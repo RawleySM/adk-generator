@@ -1,0 +1,38 @@
+"""Tool definitions for {{ project_name }}."""
+
+from google.adk.tools import FunctionTool
+{% for tool in tools %}
+{% if tool.imports %}
+{{ tool.imports }}
+{% endif %}
+{% endfor %}
+
+
+{% for tool in tools %}
+def {{ tool.name }}({% for param in tool.parameters %}{{ param.name }}: {{ param.type }}{% if param.default is defined %} = {{ param.default }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}) -> str:
+    """{{ tool.description }}
+    
+    Args:
+{% for param in tool.parameters %}
+        {{ param.name }}: {{ param.param_description }}
+{% endfor %}
+        
+    Returns:
+        {{ tool.return_description | default('The result as a string') }}
+    """
+    try:
+        {{ tool.implementation | indent(8) }}
+    except Exception as e:
+        return f"Error in {{ tool.name }}: {str(e)}"
+
+
+{{ tool.name }}_tool = FunctionTool({{ tool.name }})
+
+
+{% endfor %}
+# Export all tools
+all_tools = [
+{% for tool in tools %}
+    {{ tool.name }}_tool,
+{% endfor %}
+]

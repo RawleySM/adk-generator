@@ -1,0 +1,39 @@
+[project]
+name = "adk-generator"
+version = "0.1.0"
+description = "Build Google ADK agents with AI assistance - a multi-agent system that generates ADK projects"
+requires-python = ">=3.10"
+dependencies = [
+    "google-adk>=0.1.0",
+    "jinja2>=3.1.0",
+    "deepmerge>=1.1.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "pylint>=2.17.0",
+]
+
+[project.scripts]
+adk-gen = "adk_generator.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pylint.messages_control]
+max-line-length = 88

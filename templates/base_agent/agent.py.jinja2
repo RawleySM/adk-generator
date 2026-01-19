@@ -1,0 +1,40 @@
+"""{{ description }}"""
+
+from google.adk.agents import LlmAgent
+{% if has_tools %}
+from .tools import all_tools
+{% endif %}
+{% if has_callbacks %}
+from .callbacks import (
+    before_agent_callback,
+    after_agent_callback,
+    {% if callbacks.before_model %}before_model_callback,{% endif %}
+    {% if callbacks.after_model %}after_model_callback,{% endif %}
+    {% if callbacks.before_tool %}before_tool_callback,{% endif %}
+    {% if callbacks.after_tool %}after_tool_callback,{% endif %}
+)
+{% endif %}
+
+AGENT_INSTRUCTION = """
+{{ instruction }}
+"""
+
+root_agent = LlmAgent(
+    name="{{ agent_name }}",
+    model="{{ model }}",
+    description="{{ description }}",
+    instruction=AGENT_INSTRUCTION,
+    {% if has_tools %}
+    tools=all_tools,
+    {% else %}
+    tools=[],
+    {% endif %}
+    {% if has_callbacks %}
+    before_agent_callback=before_agent_callback,
+    after_agent_callback=after_agent_callback,
+    {% if callbacks.before_model %}before_model_callback=before_model_callback,{% endif %}
+    {% if callbacks.after_model %}after_model_callback=after_model_callback,{% endif %}
+    {% if callbacks.before_tool %}before_tool_callback=before_tool_callback,{% endif %}
+    {% if callbacks.after_tool %}after_tool_callback=after_tool_callback,{% endif %}
+    {% endif %}
+)

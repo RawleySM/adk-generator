@@ -1,0 +1,108 @@
+"""Callback implementations for {{ project_name }}."""
+
+{% if include_logging %}
+import logging
+
+logger = logging.getLogger(__name__)
+{% endif %}
+
+from google.adk.events import CallbackContext
+
+
+{% if before_agent %}
+def before_agent_callback(context: CallbackContext) -> None:
+    """Called before the agent processes a request.
+    
+    Args:
+        context: The callback context containing session and request information
+    """
+    {% if include_logging %}
+    logger.info(f"[AGENT START] Session: {context.session_id}")
+    logger.debug(f"User input: {context.user_input}")
+    {% else %}
+    print(f"[AGENT START] Processing request for session {context.session_id}")
+    {% endif %}
+{% endif %}
+
+
+{% if after_agent %}
+def after_agent_callback(context: CallbackContext) -> None:
+    """Called after the agent generates a response.
+    
+    Args:
+        context: The callback context containing the agent's response
+    """
+    {% if include_logging %}
+    logger.info(f"[AGENT END] Session: {context.session_id}")
+    logger.debug(f"Agent response: {context.response}")
+    {% else %}
+    print(f"[AGENT END] Generated response for session {context.session_id}")
+    {% endif %}
+{% endif %}
+
+
+{% if before_model %}
+def before_model_callback(context: CallbackContext) -> None:
+    """Called before the LLM API call.
+    
+    Args:
+        context: The callback context containing model input
+    """
+    {% if include_logging %}
+    logger.info(f"[MODEL CALL] Calling LLM for session {context.session_id}")
+    {% else %}
+    print(f"[MODEL CALL] Calling LLM...")
+    {% endif %}
+{% endif %}
+
+
+{% if after_model %}
+def after_model_callback(context: CallbackContext) -> None:
+    """Called after the LLM API call.
+    
+    Args:
+        context: The callback context containing model output
+    """
+    {% if include_logging %}
+    logger.info(f"[MODEL RESPONSE] Received LLM response")
+    {% else %}
+    print(f"[MODEL RESPONSE] LLM call completed")
+    {% endif %}
+{% endif %}
+
+
+{% if before_tool %}
+def before_tool_callback(context: CallbackContext) -> None:
+    """Called before a tool is executed.
+    
+    Args:
+        context: The callback context containing tool name and arguments
+    """
+    {% if include_logging %}
+    logger.info(f"[TOOL CALL] Executing tool: {context.tool_name}")
+    logger.debug(f"Tool arguments: {context.tool_args}")
+    {% else %}
+    print(f"[TOOL CALL] Executing tool: {context.tool_name}")
+    {% endif %}
+    
+    # Add authorization checks here if needed
+    # if context.tool_name == "sensitive_operation":
+    #     if not user_has_permission(context.session_id):
+    #         raise PermissionError("User not authorized")
+{% endif %}
+
+
+{% if after_tool %}
+def after_tool_callback(context: CallbackContext) -> None:
+    """Called after a tool completes execution.
+    
+    Args:
+        context: The callback context containing tool result
+    """
+    {% if include_logging %}
+    logger.info(f"[TOOL RESULT] Tool {context.tool_name} completed")
+    logger.debug(f"Tool result: {context.tool_result}")
+    {% else %}
+    print(f"[TOOL RESULT] Tool {context.tool_name} completed")
+    {% endif %}
+{% endif %}
