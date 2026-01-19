@@ -1,0 +1,37 @@
+"""{{ description }}"""
+
+from google.adk.agents import LlmAgent, LoopAgent
+{% if has_tools %}
+from .tools import all_tools
+{% endif %}
+
+# Define sub-agents that will be executed in a loop
+{% for agent in sub_agents %}
+{{ agent.name }} = LlmAgent(
+    name="{{ agent.name }}",
+    model="{{ agent.model }}",
+    instruction="""{{ agent.instruction }}""",
+    description="{{ agent.description }}",
+    {% if agent.tools %}
+    tools={{ agent.tools }},
+    {% endif %}
+    {% if agent.output_key %}
+    output_key="{{ agent.output_key }}",
+    {% endif %}
+)
+
+{% endfor %}
+
+# Create LoopAgent
+root_agent = LoopAgent(
+    name="{{ agent_name }}",
+    sub_agents=[
+        {% for agent in sub_agents %}
+        {{ agent.name }},
+        {% endfor %}
+    ],
+    {% if max_iterations %}
+    max_iterations={{ max_iterations }},
+    {% endif %}
+    description="{{ description }}"
+)
