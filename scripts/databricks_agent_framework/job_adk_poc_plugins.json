@@ -1,0 +1,19 @@
+{
+  "name": "ADK POC Plugins - Hello World Artifact Generator",
+  "tasks": [
+    {
+      "task_key": "adk_poc_plugins_task",
+      "existing_cluster_id": "1115-120035-jyzgoasz",
+      "spark_python_task": {
+        "python_file": "dbfs:/FileStore/scripts/adk_poc/adk_poc_plugins.py"
+      },
+      "libraries": [
+        {"pypi": {"package": "google-adk"}},
+        {"pypi": {"package": "mlflow"}},
+        {"pypi": {"package": "nest-asyncio"}}
+      ]
+    }
+  ],
+  "max_concurrent_runs": 1,
+  "timeout_seconds": 3600
+}

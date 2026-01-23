@@ -1,0 +1,63 @@
+# Job_B: RLM Executor (Execution Plane)
+#
+# Responsibilities:
+#   - Read parameters (artifact path, run_id/iter, etc.)
+#   - Execute the generated artifact from UC Volumes
+#   - Write result.json to Volumes
+#   - Append telemetry row to UC Delta table
+#
+# This job is triggered by Job_A (orchestrator) via the Jobs API.
+# Resource key MUST remain stable for stable job IDs across redeploys.
+
+resources:
+  jobs:
+    rlm_executor_job:
+      name: "[${bundle.target}] RLM Executor"
+      description: "RLM Agent executor - data plane for running generated artifacts"
+      
+      # Run on existing cluster (no cluster creation permissions)
+      tasks:
+        - task_key: run_executor
+          existing_cluster_id: ${var.cluster_id}
+          
+          python_wheel_task:
+            package_name: databricks_rlm_agent
+            entry_point: rlm-executor
+            # Parameters passed to the entrypoint - these will be overridden
+            # by Job_A when it submits runs via Jobs API
+            parameters:
+              - "--artifact-path="
+              - "--run-id="
+              - "--iteration="
+
+          # Libraries - the wheel artifact built by the bundle
+          libraries:
+            - whl: ../databricks_rlm_agent/dist/databricks_rlm_agent-*.whl
+
+      # Job parameters - these can be overridden by Job_A when triggering runs
+      parameters:
+        - name: ARTIFACT_PATH
+          default: ""
+        - name: RUN_ID
+          default: ""
+        - name: ITERATION
+          default: "0"
+        - name: ADK_DELTA_CATALOG
+          default: ${var.uc_catalog}
+        - name: ADK_DELTA_SCHEMA
+          default: ${var.uc_schema}
+        - name: ADK_ARTIFACTS_PATH
+          default: ${var.artifacts_path}
+        - name: ADK_SECRET_SCOPE
+          default: ${var.secret_scope}
+
+      # Job settings
+      max_concurrent_runs: 1  # Only one executor run at a time per iteration
+      timeout_seconds: 3600   # 1 hour
+
+      # Tags for organization
+      tags:
+        project: rlm-agent
+        component: executor
+        bundle: ${bundle.name}
+

@@ -1,0 +1,12 @@
+{
+  "name": "etl_jira_data_job",
+  "tasks": [
+    {
+      "task_key": "etl_task",
+      "existing_cluster_id": "1115-120035-jyzgoasz",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/rstanhope@spendmend.com/etl_notebook"
+      }
+    }
+  ]
+}

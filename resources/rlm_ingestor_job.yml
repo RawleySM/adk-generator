@@ -1,0 +1,68 @@
+# Job_C: RLM Ingestor (CDF Polling Plane)
+#
+# Responsibilities:
+#   - Poll silo_dev_rs.task.jira_raw_data using Change Data Feed (CDF)
+#   - Detect new tasks assigned to databricks-rlm-agent
+#   - Track watermark in ingestor_state table
+#   - Trigger Job_A (orchestrator) via Jobs API for each new task
+#   - Record telemetry events for polling and triggers
+#
+# This job runs on a schedule (every 5 minutes) and triggers the orchestrator
+# when new work is detected.
+# Resource key MUST remain stable for stable job IDs across redeploys.
+
+resources:
+  jobs:
+    rlm_ingestor_job:
+      name: "[${bundle.target}] RLM Ingestor"
+      description: "RLM Agent ingestor - CDF polling for new tasks to process"
+
+      # Schedule: run every 5 minutes
+      schedule:
+        quartz_cron_expression: "0 */5 * * * ?"
+        timezone_id: "America/New_York"
+        pause_status: PAUSED  # Start paused; enable when ready
+
+      # Run on existing cluster (no cluster creation permissions)
+      tasks:
+        - task_key: poll_trigger_table
+          existing_cluster_id: ${var.cluster_id}
+
+          python_wheel_task:
+            package_name: databricks_rlm_agent
+            entry_point: rlm-ingestor
+            # Parameters passed to the entrypoint
+            parameters:
+              - "--catalog=${var.uc_catalog}"
+              - "--schema=${var.uc_schema}"
+              - "--trigger-table=silo_dev_rs.task.jira_raw_data"
+              - "--assignee-filter=databricks-rlm-agent"
+
+          # Libraries - the wheel artifact built by the bundle
+          libraries:
+            - whl: ../databricks_rlm_agent/dist/databricks_rlm_agent-*.whl
+
+      # Job parameters for override and environment access
+      parameters:
+        - name: ADK_DELTA_CATALOG
+          default: ${var.uc_catalog}
+        - name: ADK_DELTA_SCHEMA
+          default: ${var.uc_schema}
+        - name: ADK_TRIGGER_TABLE
+          default: "silo_dev_rs.task.jira_raw_data"
+        - name: ADK_ASSIGNEE_FILTER
+          default: "databricks-rlm-agent"
+        - name: ADK_ORCHESTRATOR_JOB_ID
+          default: ""  # Will be set by deploy script after all jobs exist
+        - name: ADK_SECRET_SCOPE
+          default: ${var.secret_scope}
+
+      # Job settings
+      max_concurrent_runs: 1  # Only one ingestor poll at a time
+      timeout_seconds: 300    # 5 minutes (should complete well before next schedule)
+
+      # Tags for organization
+      tags:
+        project: rlm-agent
+        component: ingestor
+        bundle: ${bundle.name}

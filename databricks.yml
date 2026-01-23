@@ -1,0 +1,71 @@
+# Databricks Asset Bundle configuration for RLM Agent (Three-Job Pattern)
+#
+# This bundle defines three Lakeflow Jobs:
+#   - Job_A (rlm_orchestrator_job): Control plane / orchestration
+#   - Job_B (rlm_executor_job): Execution plane / artifact runner
+#   - Job_C (rlm_ingestor_job): CDF polling plane / task ingestion
+#
+# Job_C polls for new tasks and triggers Job_A.
+# Job_A calls the Databricks Jobs API to trigger Job_B runs.
+#
+# Deploy: databricks bundle deploy --profile <profile>
+# Run:    databricks jobs run-now --job-id <orchestrator_job_id>
+
+bundle:
+  name: databricks-rlm-agent
+
+variables:
+  # Cluster configuration (existing cluster - no cluster creation permissions)
+  cluster_id:
+    description: "Existing cluster ID for job execution"
+    default: "1115-120035-jyzgoasz"
+
+  # Unity Catalog configuration
+  uc_catalog:
+    description: "Unity Catalog name for session/telemetry tables"
+    default: "silo_dev_rs"
+
+  uc_schema:
+    description: "Schema name within the catalog"
+    default: "adk"
+
+  # UC Volumes paths for artifacts
+  artifacts_path:
+    description: "UC Volumes path for artifacts"
+    default: "/Volumes/silo_dev_rs/adk/artifacts"
+
+  agent_code_path:
+    description: "UC Volumes path for generated agent code"
+    default: "/Volumes/silo_dev_rs/adk/agent_code/agent_code_raw.py"
+
+  # Secret scope
+  secret_scope:
+    description: "Databricks secret scope name"
+    default: "adk-secrets"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      # Will be set from profile or env
+      root_path: ~/.bundle/${bundle.name}/${bundle.target}
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
+
+# Include job resource definitions from separate files
+include:
+  - resources/*.yml
+
+# Artifact configuration - build the wheel from databricks_rlm_agent
+# The build command runs from the 'path' directory
+# Bundle expects wheels in <path>/dist/*.whl by default
+artifacts:
+  databricks_rlm_agent_wheel:
+    type: whl
+    path: ./databricks_rlm_agent
+    build: mkdir -p dist && pip wheel --no-deps --wheel-dir dist .
+

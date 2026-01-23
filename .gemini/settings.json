@@ -1,0 +1,45 @@
+{
+  "telemetry": {
+    "enabled": true,
+    "target": "gcp",
+    "useCliAuth": true
+  },
+  "ide": {
+    "enabled": true,
+    "hasSeenNudge": true
+  },
+  "context": {
+    "fileFiltering": {
+      "respectGitIgnore": true
+    },
+    "includeDirectories": [
+      "/home/rawleysm/"
+    ]
+  },
+  "security": {
+    "auth": {
+      "selectedType": "oauth-personal"
+    },
+    "folderTrust": {
+      "enabled": true
+    },
+    "enablePermanentToolApproval": true
+  },
+  "ui": {
+    "footer": {
+      "hideContextPercentage": false
+    },
+    "showModelInfoInChat": true
+  },
+  "general": {
+    "vimMode": false,
+    "previewFeatures": true,
+    "preferredEditor": "vscode"
+  },
+  "tools": {
+    "shell": {
+      "enableInteractiveShell": false
+    }
+  },
+  "mcpServers": {}
+}

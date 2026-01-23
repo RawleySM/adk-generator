@@ -1,0 +1,75 @@
+# Job_A: RLM Orchestrator (Control Plane)
+#
+# Responsibilities:
+#   - Load secrets/config
+#   - Create/continue sessions in UC via DeltaSessionService
+#   - Generate executable artifacts into UC Volumes
+#   - Submit Job_B (executor) runs via Jobs API
+#   - Record submission metadata and high-level telemetry
+#
+# Resource key MUST remain stable for stable job IDs across redeploys.
+
+resources:
+  jobs:
+    rlm_orchestrator_job:
+      name: "[${bundle.target}] RLM Orchestrator"
+      description: "RLM Agent orchestrator - control plane for the two-job pattern"
+      
+      # Run on existing cluster (no cluster creation permissions)
+      tasks:
+        - task_key: run_orchestrator
+          existing_cluster_id: ${var.cluster_id}
+          
+          python_wheel_task:
+            package_name: databricks_rlm_agent
+            entry_point: rlm-orchestrator
+            # CLI args for static config; dynamic job params (ADK_PROMPT etc.) are
+            # fetched at runtime via spark.conf or dbutils by the CLI itself
+            parameters:
+              - "--catalog=${var.uc_catalog}"
+              - "--schema=${var.uc_schema}"
+
+          # Libraries - the wheel artifact built by the bundle
+          libraries:
+            - whl: ../databricks_rlm_agent/dist/databricks_rlm_agent-*.whl
+
+      # Environment variables for the job
+      # Note: spark_env_vars would go inside new_cluster config
+      # For existing_cluster_id, env vars are set via task parameters or dbutils
+      parameters:
+        - name: ADK_DELTA_CATALOG
+          default: ${var.uc_catalog}
+        - name: ADK_DELTA_SCHEMA
+          default: ${var.uc_schema}
+        - name: ADK_ARTIFACTS_PATH
+          default: ${var.artifacts_path}
+        - name: ADK_AGENT_CODE_PATH
+          default: ${var.agent_code_path}
+        - name: ADK_EXECUTOR_JOB_ID
+          default: ""  # Will be set by deploy script after both jobs exist
+        - name: ADK_SECRET_SCOPE
+          default: ${var.secret_scope}
+        - name: ADK_PROMPT
+          default: ""  # User prompt - passed via run-now or trigger
+        - name: ADK_SESSION_ID
+          default: "session_001"
+        - name: ADK_USER_ID
+          default: "job_user"
+        - name: ADK_MAX_ITERATIONS
+          default: "1"
+
+      # Job settings
+      max_concurrent_runs: 1
+      timeout_seconds: 7200  # 2 hours
+
+      # Email notifications (optional - configure as needed)
+      # email_notifications:
+      #   on_failure:
+      #     - your-email@example.com
+
+      # Tags for organization
+      tags:
+        project: rlm-agent
+        component: orchestrator
+        bundle: ${bundle.name}
+

@@ -5,8 +5,8 @@ other ADK agent projects. It uses specialist agents for design, code generation,
 and review.
 """
 
-from .app import generator_app
-from .agent import root_agent
+from .adk_generator.agent import root_agent
+from .adk_generator.agent import app as generator_app
 
 __version__ = "0.1.0"
 

@@ -19,7 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+.obsolete/
 # Virtual environments
 venv/
 env/
@@ -51,3 +51,11 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Databricks bundle state
+.databricks/
