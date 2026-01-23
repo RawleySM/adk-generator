@@ -130,8 +130,10 @@ async def run_conversation(
     user_id: str,
     session_id: str,
     prompt: str,
+    timeout_seconds: float = 120.0,
+    event_timeout_seconds: float = 60.0,
 ) -> str:
-    """Run a single conversation turn.
+    """Run a single conversation turn with timeout protection.
 
     Args:
         runner: The ADK Runner instance.
@@ -139,23 +141,59 @@ async def run_conversation(
         user_id: User identifier.
         session_id: Session identifier.
         prompt: User prompt text.
+        timeout_seconds: Maximum total time for the entire conversation turn.
+            Defaults to 300 seconds (5 minutes).
+        event_timeout_seconds: Maximum time to wait between events from the
+            stream. If no event is received within this time, the conversation
+            is considered stalled. Defaults to 60 seconds.
 
     Returns:
         The agent's response text.
+
+    Raises:
+        asyncio.TimeoutError: If the conversation exceeds timeout_seconds or
+            if no events are received within event_timeout_seconds.
     """
     final_response = "No response generated."
 
-    async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=prompt)]
-        ),
-    ):
-        if event.is_final_response():
-            if event.content and event.content.parts:
-                final_response = event.content.parts[0].text
+    async def _iterate_with_event_timeout():
+        """Iterate over events with per-event timeout watchdog."""
+        nonlocal final_response
+        event_iter = runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=prompt)]
+            ),
+        ).__aiter__()
+
+        while True:
+            try:
+                # Wait for next event with timeout - this is the watchdog
+                event = await asyncio.wait_for(
+                    event_iter.__anext__(),
+                    timeout=event_timeout_seconds,
+                )
+                if event.is_final_response():
+                    if event.content and event.content.parts:
+                        final_response = event.content.parts[0].text
+            except StopAsyncIteration:
+                # Stream completed normally
+                break
+            except asyncio.TimeoutError:
+                print(f"WARNING: Event stream stalled - no event received in {event_timeout_seconds}s")
+                raise
+
+    try:
+        # Overall timeout for the entire conversation turn
+        await asyncio.wait_for(
+            _iterate_with_event_timeout(),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        print(f"ERROR: Conversation timed out after {timeout_seconds}s total or {event_timeout_seconds}s between events")
+        raise
 
     return final_response
 

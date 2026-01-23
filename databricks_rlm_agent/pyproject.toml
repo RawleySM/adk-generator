@@ -1,12 +1,13 @@
 [project]
 name = "databricks_rlm_agent"
-version = "0.1.13"
+version = "0.1.22"
 description = "RLM Agent for Databricks with Delta session persistence - Two-job orchestrator/executor pattern"
 requires-python = ">=3.10"
 dependencies = [
     "google-adk>=0.1.0",
     "pydantic>=2.0.0",
     "nest-asyncio>=1.5.0",
+    "databricks-sdk>=0.20.0",
     # Note: pyspark is provided by Databricks Runtime, not packaged in wheel
 ]
 
@@ -28,8 +29,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 # Map package name to current directory since pyproject.toml is in the package directory
-package-dir = {"databricks_rlm_agent" = ".", "databricks_rlm_agent.sessions" = "sessions", "databricks_rlm_agent.plugins" = "plugins"}
-packages = ["databricks_rlm_agent", "databricks_rlm_agent.sessions", "databricks_rlm_agent.plugins"]
+package-dir = {"databricks_rlm_agent" = ".", "databricks_rlm_agent.sessions" = "sessions", "databricks_rlm_agent.plugins" = "plugins", "databricks_rlm_agent.tools" = "tools"}
+packages = ["databricks_rlm_agent", "databricks_rlm_agent.sessions", "databricks_rlm_agent.plugins", "databricks_rlm_agent.tools"]
 
 [tool.setuptools.package-data]
 databricks_rlm_agent = ["*.py"]

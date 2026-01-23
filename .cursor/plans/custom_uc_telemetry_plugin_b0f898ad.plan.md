@@ -113,4 +113,3 @@ Runner->>Runner: continue normal execution
 ## Files to touch
 
 - Add: [`databricks_rlm_agent/plugins/uc_delta_telemetry_plugin.py`](/home/rawleysm/dev/adk-generator/databricks_rlm_agent/plugins/uc_delta_telemetry_plugin.py)
-- Update wiring:

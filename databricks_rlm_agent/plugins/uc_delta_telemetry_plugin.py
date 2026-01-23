@@ -160,6 +160,12 @@ def _append_telemetry_row(
         The telemetry_id of the inserted row.
     """
     from pyspark.sql import Row
+    from pyspark.sql.types import (
+        StructType,
+        StructField,
+        StringType,
+        TimestampType,
+    )
 
     table_name = _get_telemetry_table_name(catalog, schema, table)
 
@@ -189,9 +195,30 @@ def _append_telemetry_row(
         created_time=created_time,
     )
 
+    # Explicit schema to prevent inference errors on None fields
+    telemetry_schema = StructType(
+        [
+            StructField("telemetry_id", StringType(), False),
+            StructField("ts", TimestampType(), False),
+            StructField("app_name", StringType(), True),
+            StructField("user_id", StringType(), True),
+            StructField("session_id", StringType(), True),
+            StructField("invocation_id", StringType(), True),
+            StructField("branch", StringType(), True),
+            StructField("agent_name", StringType(), True),
+            StructField("callback_name", StringType(), False),
+            StructField("event_id", StringType(), True),
+            StructField("tool_name", StringType(), True),
+            StructField("function_call_id", StringType(), True),
+            StructField("model_name", StringType(), True),
+            StructField("payload_json", StringType(), True),
+            StructField("created_time", TimestampType(), False),
+        ]
+    )
+
     try:
-        # Use DataFrame API for safe parameterized insert
-        spark.createDataFrame([row]).write.mode("append").saveAsTable(table_name)
+        # Use DataFrame API for safe parameterized insert with explicit schema
+        spark.createDataFrame([row], schema=telemetry_schema).write.mode("append").saveAsTable(table_name)
         logger.debug(f"ADK telemetry row inserted: {callback_name} ({telemetry_id})")
         return telemetry_id
     except Exception as e:
@@ -222,8 +249,9 @@ class UcDeltaTelemetryPlugin(BasePlugin):
         ... )
     """
 
-    # Class-level lock for thread safety
-    _lock = threading.Lock()
+    # Class-level lock for thread safety (RLock allows re-entrant acquisition
+    # so _ensure_table() can safely call _get_spark() while holding the lock)
+    _lock = threading.RLock()
 
     def __init__(
         self,

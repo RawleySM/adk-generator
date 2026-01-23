@@ -17,11 +17,11 @@ resources:
       name: "[${bundle.target}] RLM Ingestor"
       description: "RLM Agent ingestor - CDF polling for new tasks to process"
 
-      # Schedule: run every 5 minutes
+      # Schedule: run every 1 minute
       schedule:
-        quartz_cron_expression: "0 */5 * * * ?"
+        quartz_cron_expression: "0 * * * * ?"
         timezone_id: "America/New_York"
-        pause_status: PAUSED  # Start paused; enable when ready
+        pause_status: UNPAUSED  # Enabled for 1-min polling
 
       # Run on existing cluster (no cluster creation permissions)
       tasks:

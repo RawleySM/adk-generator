@@ -162,7 +162,7 @@ def enable_cdf(
         response = client.statement_execution.execute_statement(
             warehouse_id=get_sql_warehouse_id(client),
             statement=sql,
-            wait_timeout="60s",
+            wait_timeout="50s",
         )
 
         if response.status and response.status.state.value == "SUCCEEDED":

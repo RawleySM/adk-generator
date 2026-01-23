@@ -221,7 +221,10 @@ def orchestrator_main():
     # Run the orchestrator
     try:
         exit_code = asyncio.run(_run_orchestrator(args, logger))
-        sys.exit(exit_code)
+        # Only call sys.exit for failures - calling sys.exit(0) in Databricks IPython
+        # context triggers a SystemExit that gets caught and reported as a failure
+        if exit_code != 0:
+            sys.exit(exit_code)
     except Exception as e:
         logger.exception(f"Orchestrator failed: {e}")
         sys.exit(1)
@@ -556,7 +559,10 @@ def executor_main():
     # Run the executor
     try:
         exit_code = _run_executor(args, logger)
-        sys.exit(exit_code)
+        # Only call sys.exit for failures - calling sys.exit(0) in Databricks IPython
+        # context triggers a SystemExit that gets caught and reported as a failure
+        if exit_code != 0:
+            sys.exit(exit_code)
     except Exception as e:
         logger.exception(f"Executor failed: {e}")
         sys.exit(1)
@@ -698,7 +704,10 @@ def ingestor_main():
     # Run the ingestor
     try:
         exit_code = asyncio.run(_run_ingestor(args, logger))
-        sys.exit(exit_code)
+        # Only call sys.exit for failures - calling sys.exit(0) in Databricks IPython
+        # context triggers a SystemExit that gets caught and reported as a failure
+        if exit_code != 0:
+            sys.exit(exit_code)
     except Exception as e:
         logger.exception(f"Ingestor failed: {e}")
         sys.exit(1)

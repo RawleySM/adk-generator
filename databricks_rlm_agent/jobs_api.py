@@ -220,10 +220,19 @@ def get_run_output(databricks_run_id: int) -> dict[str, Any]:
     client = _get_workspace_client()
     
     try:
-        output = client.jobs.get_run_output(run_id=databricks_run_id)
+        # For multi-task jobs, we must get the output of the specific task run
+        run = client.jobs.get_run(run_id=databricks_run_id)
+        target_run_id = databricks_run_id
+        
+        if run.tasks:
+            # If it has tasks, use the run_id of the first task (the actual workload)
+            target_run_id = run.tasks[0].run_id
+            logger.info(f"Retrieving output for task run {target_run_id} (parent run {databricks_run_id})")
+
+        output = client.jobs.get_run_output(run_id=target_run_id)
         
         result = {
-            "run_id": databricks_run_id,
+            "run_id": target_run_id,
             "error": output.error if output.error else None,
             "error_trace": output.error_trace if output.error_trace else None,
         }

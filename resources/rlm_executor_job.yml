@@ -26,9 +26,9 @@ resources:
             # Parameters passed to the entrypoint - these will be overridden
             # by Job_A when it submits runs via Jobs API
             parameters:
-              - "--artifact-path="
-              - "--run-id="
-              - "--iteration="
+              - "--artifact-path={{job.parameters.ARTIFACT_PATH}}"
+              - "--run-id={{job.parameters.RUN_ID}}"
+              - "--iteration={{job.parameters.ITERATION}}"
 
           # Libraries - the wheel artifact built by the bundle
           libraries:

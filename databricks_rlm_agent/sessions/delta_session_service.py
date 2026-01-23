@@ -254,7 +254,11 @@ class DeltaSessionService(BaseSessionService):
         """Deserialize a JSON string to a dictionary."""
         if not json_str:
             return {}
-        return json.loads(json_str)
+        try:
+            return json.loads(json_str, strict=False)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to decode JSON: {e}. String: {json_str[:100]}...")
+            raise
 
     async def _get_app_state(self, app_name: str) -> dict[str, Any]:
         """Get the app state for the given app_name."""

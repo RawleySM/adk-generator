@@ -1,8 +1,9 @@
 import os
 import logging
-from google.adk.agents import Agent
+from google.adk.agents import LlmAgent
+from google.adk.agents.loop_agent import LoopAgent
 from google.adk.apps import App
-from google.adk.tools import FunctionTool, ToolContext, AgentTool
+from google.adk.tools import FunctionTool
 
 # Import pre-built plugins
 from google.adk.plugins.logging_plugin import LoggingPlugin
@@ -14,81 +15,11 @@ from databricks_rlm_agent.plugins import UcDeltaTelemetryPlugin
 # Import prompts
 from databricks_rlm_agent.prompts import GLOBAL_INSTRUCTIONS, ROOT_AGENT_INSTRUCTION
 
+# Import tools
+from databricks_rlm_agent.tools import save_python_code, save_artifact_to_volumes, llm_query, exit_loop
+
 # Note: API keys (GOOGLE_API_KEY, etc.) are loaded from Databricks Secrets
 # via the secrets module at runtime startup in run.py. Do NOT hardcode keys here.
-
-# Databricks Volumes paths - configurable via environment variables
-ARTIFACTS_PATH = os.environ.get("ADK_ARTIFACTS_PATH", "/Volumes/silo_dev_rs/adk/artifacts")
-AGENT_CODE_PATH = os.environ.get("ADK_AGENT_CODE_PATH", "/Volumes/silo_dev_rs/adk/agent_code/agent_code_raw.py")
-
-def save_python_code(code: str, tool_context: ToolContext) -> dict:
-    """
-    Saves generated Python code to a specific Databricks Volume location.
-    Target path: /Volumes/silo_dev_rs/adk/agent_code/agent_code_raw.py
-
-    Args:
-        code (str): The Python code to save.
-        tool_context (ToolContext): The tool context.
-
-    Returns:
-        dict: Status of the save operation.
-    """
-    import os
-
-    try:
-        # Ensure the directory exists
-        directory = os.path.dirname(AGENT_CODE_PATH)
-        os.makedirs(directory, exist_ok=True)
-
-        # Write the content to the file
-        with open(AGENT_CODE_PATH, 'w') as f:
-            f.write(code)
-
-        print(f"Agent code saved successfully to: {AGENT_CODE_PATH}")
-        return {
-            "status": "success",
-            "message": f"Code saved to {AGENT_CODE_PATH}",
-            "file_path": AGENT_CODE_PATH
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-def save_artifact_to_volumes(filename: str, content: str, tool_context: ToolContext) -> dict:
-    """
-    Saves a file artifact to Databricks Volumes.
-
-    Args:
-        filename (str): The name of the file to save.
-        content (str): The content to write to the file.
-        tool_context (ToolContext): The tool context.
-
-    Returns:
-        dict: Status of the save operation with the file path.
-    """
-    import os
-
-    try:
-        # Ensure the artifacts directory exists
-        os.makedirs(ARTIFACTS_PATH, exist_ok=True)
-
-        # Full path for the artifact
-        file_path = os.path.join(ARTIFACTS_PATH, filename)
-
-        # Write the content to the file
-        with open(file_path, 'w') as f:
-            f.write(content)
-
-        print(f"Artifact saved successfully: {file_path}")
-        return {
-            "status": "success",
-            "message": f"File saved to {file_path}",
-            "file_path": file_path
-        }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 
 def get_logging_plugin() -> LoggingPlugin:
@@ -150,23 +81,51 @@ global_instruction_plugin = GlobalInstructionPlugin(
     name="adk_poc_global_instructions"
 )
 
-# Define the sub-agent
-rlm_subLM = Agent(
-    name="rlm_subLM",
+# =============================================================================
+# Sub-Agents (LlmAgent instances)
+# =============================================================================
+
+# LLM Query sub-agent: Handles semantic analysis queries from the orchestrator
+llm_query_agent = LlmAgent(
+    name="llm_query",
     model="gemini-3-pro-preview",
-    instruction="You are a specialist sub-agent. Provide detailed answers to the query provided to you.",
+    instruction="""You are a specialist sub-agent for semantic analysis within a REPL environment.
+Your role is to:
+1. Process queries containing context data (table schemas, code snippets, data samples)
+2. Analyze the provided context based on embedded instructions
+3. Provide detailed, structured answers optimized for further processing
+
+You can handle around 500K characters in your context window. When receiving batched records,
+analyze them efficiently and return consolidated findings.
+
+Always structure your responses clearly with:
+- Key findings
+- Specific recommendations
+- Confidence levels (HIGH/MEDIUM/LOW) where applicable""",
 )
 
-# Define the Agent with enhanced instruction
-root_agent = Agent(
-    name="databricks_analyst_with_plugins",
+# Databricks Analyst sub-agent: Primary agent for data discovery and code generation
+databricks_analyst = LlmAgent(
+    name="databricks_analyst",
     model="gemini-3-pro-preview",
     instruction=ROOT_AGENT_INSTRUCTION,
     tools=[
         FunctionTool(save_python_code),
         FunctionTool(save_artifact_to_volumes),
-        AgentTool(agent=rlm_subLM)
+        FunctionTool(llm_query),
+        FunctionTool(exit_loop),
     ]
+)
+
+# =============================================================================
+# Root Agent: LoopAgent Orchestrator
+# =============================================================================
+
+# Orchestrator Loop: Iteratively executes sub-agents until completion or max_iterations
+root_agent = LoopAgent(
+    name="orchestrator_loop",
+    max_iterations=10,
+    sub_agents=[databricks_analyst, llm_query_agent]
 )
 
 # Wrap the agent in the google-adk App class
@@ -187,12 +146,21 @@ app = App(
 
 # Export key components for use by run.py and other entry points
 __all__ = [
-    "root_agent",
+    # Agents
+    "root_agent",           # LoopAgent orchestrator (orchestrator_loop)
+    "databricks_analyst",   # LlmAgent for data analysis and code generation
+    "llm_query_agent",      # LlmAgent for semantic analysis queries
+    # App
     "app",
+    # Plugins
     "logging_plugin",
     "global_instruction_plugin",
+    # Tools
     "save_python_code",
     "save_artifact_to_volumes",
+    "llm_query",
+    "exit_loop",
+    # Plugin factories
     "get_logging_plugin",
     "get_telemetry_plugin",
 ]
