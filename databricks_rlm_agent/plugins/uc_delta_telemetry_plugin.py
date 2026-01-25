@@ -3,6 +3,7 @@
 A custom ADK plugin that:
 1. Preserves stdout print() logging for terminal observability (like LoggingPlugin)
 2. Persists callback-level telemetry to a Unity Catalog Delta table (adk_telemetry)
+3. Supports special logging flags for blocked tool executions (safety plugin integration)
 
 Table: silo_dev_rs.adk.adk_telemetry (configurable via env vars)
 """
@@ -114,6 +115,8 @@ def _ensure_adk_telemetry_table(
             tool_name STRING,
             function_call_id STRING,
             model_name STRING,
+            tool_blocked BOOLEAN,
+            blocked_reason STRING,
             payload_json STRING,
             created_time TIMESTAMP NOT NULL
         )
@@ -146,6 +149,8 @@ def _append_telemetry_row(
     tool_name: Optional[str] = None,
     function_call_id: Optional[str] = None,
     model_name: Optional[str] = None,
+    tool_blocked: Optional[bool] = None,
+    blocked_reason: Optional[str] = None,
     payload: Optional[dict[str, Any]] = None,
     catalog: str = ADK_DELTA_CATALOG,
     schema: str = ADK_DELTA_SCHEMA,
@@ -161,6 +166,7 @@ def _append_telemetry_row(
     """
     from pyspark.sql import Row
     from pyspark.sql.types import (
+        BooleanType,
         StructType,
         StructField,
         StringType,
@@ -191,6 +197,8 @@ def _append_telemetry_row(
         tool_name=tool_name,
         function_call_id=function_call_id,
         model_name=model_name,
+        tool_blocked=tool_blocked,
+        blocked_reason=blocked_reason,
         payload_json=payload_json,
         created_time=created_time,
     )
@@ -211,6 +219,8 @@ def _append_telemetry_row(
             StructField("tool_name", StringType(), True),
             StructField("function_call_id", StringType(), True),
             StructField("model_name", StringType(), True),
+            StructField("tool_blocked", BooleanType(), True),
+            StructField("blocked_reason", StringType(), True),
             StructField("payload_json", StringType(), True),
             StructField("created_time", TimestampType(), False),
         ]
@@ -218,7 +228,8 @@ def _append_telemetry_row(
 
     try:
         # Use DataFrame API for safe parameterized insert with explicit schema
-        spark.createDataFrame([row], schema=telemetry_schema).write.mode("append").saveAsTable(table_name)
+        # Enable mergeSchema for schema evolution (e.g., new columns like tool_blocked)
+        spark.createDataFrame([row], schema=telemetry_schema).write.mode("append").option("mergeSchema", "true").saveAsTable(table_name)
         logger.debug(f"ADK telemetry row inserted: {callback_name} ({telemetry_id})")
         return telemetry_id
     except Exception as e:
@@ -325,6 +336,8 @@ class UcDeltaTelemetryPlugin(BasePlugin):
         event: Optional[Event] = None,
         tool_name: Optional[str] = None,
         model_name: Optional[str] = None,
+        tool_blocked: Optional[bool] = None,
+        blocked_reason: Optional[str] = None,
         payload: Optional[dict[str, Any]] = None,
     ) -> None:
         """Persist telemetry row to UC Delta."""
@@ -389,6 +402,8 @@ class UcDeltaTelemetryPlugin(BasePlugin):
                 tool_name=tool_name,
                 function_call_id=function_call_id,
                 model_name=model_name,
+                tool_blocked=tool_blocked,
+                blocked_reason=blocked_reason,
                 payload=payload,
                 catalog=self._catalog,
                 schema=self._schema,

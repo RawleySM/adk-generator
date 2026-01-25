@@ -1,7 +1,11 @@
 """Entry point for running the Databricks RLM Agent with Delta session persistence.
 
-This module wires the DeltaSessionService to the ADK Runner, enabling durable
-session state across Databricks Lakeflow job runs.
+This module wires the DeltaSessionService and ArtifactService to the ADK Runner,
+enabling durable session state and artifact storage across Databricks Lakeflow job runs.
+
+The RLM workflow uses:
+- DeltaSessionService: Persists session state to Unity Catalog Delta tables
+- InMemoryArtifactService: Stores code artifacts for execution (future: DeltaArtifactService)
 
 Usage:
     python -m databricks_rlm_agent.run
@@ -28,6 +32,7 @@ import os
 from typing import Optional
 
 from google.adk.runners import Runner
+from google.adk.artifacts import InMemoryArtifactService
 from google.genai import types
 
 from .sessions import DeltaSessionService
@@ -76,7 +81,7 @@ async def create_runner(
     catalog: str = CATALOG,
     schema: str = SCHEMA,
 ) -> tuple[Runner, DeltaSessionService]:
-    """Create a Runner with DeltaSessionService.
+    """Create a Runner with DeltaSessionService and ArtifactService.
 
     Args:
         spark: Optional SparkSession. If None, will create one.
@@ -110,11 +115,18 @@ async def create_runner(
         schema=schema,
     )
 
-    # Create Runner with session service and plugins
+    # Initialize artifact service for RLM workflow
+    # InMemoryArtifactService is used for development
+    # Future: DeltaArtifactService for production persistence to UC Volumes
+    artifact_service = InMemoryArtifactService()
+    print(f"[ARTIFACTS] Using InMemoryArtifactService for artifact storage")
+
+    # Create Runner with session service, artifact service, and plugins
     runner = Runner(
         agent=root_agent,
         app_name=APP_NAME,
         session_service=session_service,
+        artifact_service=artifact_service,  # Enables context.save_artifact/load_artifact
         plugins=[
             logging_plugin,
             global_instruction_plugin,

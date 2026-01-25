@@ -1,3 +1,26 @@
+"""Agent definitions for Databricks RLM Agent.
+
+This module defines the agent hierarchy for the RLM (Recursive Language Model) workflow:
+
+Agent Sequence in LoopAgent:
+    root_agent (LoopAgent)
+      └── sub_agents:
+            1. databricks_analyst (LlmAgent)       - generates code, calls delegate_code_results()
+            2. job_builder (BaseAgent)             - deterministic job submission
+            3. results_processor_agent (LlmAgent)  - processes results with injected context
+
+Workflow:
+    databricks_analyst → delegate_code_results() → [validation plugins] → artifact registry
+                                                                               ↓
+                                                                         job_builder (BaseAgent)
+                                                                               ↓
+                                                                          Job_B executor
+                                                                               ↓
+                                                                 results_processor_agent (with injected context)
+                                                                               ↓
+                                                                         context pruning → loop continues
+"""
+
 import os
 import logging
 from google.adk.agents import LlmAgent
@@ -9,14 +32,31 @@ from google.adk.tools import FunctionTool
 from google.adk.plugins.logging_plugin import LoggingPlugin
 from google.adk.plugins.global_instruction_plugin import GlobalInstructionPlugin
 
-# Import custom UC telemetry plugin
-from databricks_rlm_agent.plugins import UcDeltaTelemetryPlugin
+# Import custom plugins
+from databricks_rlm_agent.plugins import (
+    UcDeltaTelemetryPlugin,
+    UcToolExecutionSafetyPlugin,
+    FormattingCheckPlugin,
+    CodeLintingPlugin,
+    RlmContextInjectionPlugin,
+    RlmContextPruningPlugin,
+)
+
+# Import agents
+from databricks_rlm_agent.agents import JobBuilderAgent
 
 # Import prompts
 from databricks_rlm_agent.prompts import GLOBAL_INSTRUCTIONS, ROOT_AGENT_INSTRUCTION
 
 # Import tools
-from databricks_rlm_agent.tools import save_python_code, save_artifact_to_volumes, llm_query, exit_loop
+from databricks_rlm_agent.tools import (
+    save_artifact_to_volumes,
+    exit_loop,
+    delegate_code_results,
+    repo_filename_search,
+    metadata_keyword_search,
+    get_repo_file,
+)
 
 # Note: API keys (GOOGLE_API_KEY, etc.) are loaded from Databricks Secrets
 # via the secrets module at runtime startup in run.py. Do NOT hardcode keys here.
@@ -69,52 +109,105 @@ def get_telemetry_plugin(
     )
 
 
-# Initialize plugins
+# =============================================================================
+# Plugin Initialization
+# =============================================================================
+
 # Use UC Delta telemetry plugin by default (replaces LoggingPlugin with UC persistence)
 # Set ADK_USE_LOGGING_PLUGIN=1 to use the original LoggingPlugin/DebugLoggingPlugin instead
 if os.environ.get("ADK_USE_LOGGING_PLUGIN", "").lower() in ("1", "true", "yes"):
     logging_plugin = get_logging_plugin()
 else:
     logging_plugin = get_telemetry_plugin()
+
 global_instruction_plugin = GlobalInstructionPlugin(
     global_instruction=GLOBAL_INSTRUCTIONS,
     name="adk_poc_global_instructions"
+)
+
+# Safety Plugin: Blocks destructive operations in generated code
+safety_plugin = UcToolExecutionSafetyPlugin(
+    name="uc_tool_execution_safety",
+    severity_threshold="medium",  # Block medium and high severity patterns
+)
+
+# Formatting Check Plugin: Validates delegation blob format
+formatting_plugin = FormattingCheckPlugin(
+    name="formatting_check",
+    strict_mode=False,  # Don't require instruction docstring
+)
+
+# Code Linting Plugin: Validates Python syntax before execution
+linting_plugin = CodeLintingPlugin(
+    name="code_linting",
+    include_code_context=True,
+    context_lines=3,
+)
+
+# Context Injection Plugin: Injects execution results into results_processor_agent
+context_injection_plugin = RlmContextInjectionPlugin(
+    name="rlm_context_injection",
+    target_agent_name="results_processor",
+)
+
+# Context Pruning Plugin: Clears state after results_processor_agent completes
+context_pruning_plugin = RlmContextPruningPlugin(
+    name="rlm_context_pruning",
+    target_agent_name="results_processor",
 )
 
 # =============================================================================
 # Sub-Agents (LlmAgent instances)
 # =============================================================================
 
-# LLM Query sub-agent: Handles semantic analysis queries from the orchestrator
-llm_query_agent = LlmAgent(
-    name="llm_query",
-    model="gemini-3-pro-preview",
-    instruction="""You are a specialist sub-agent for semantic analysis within a REPL environment.
-Your role is to:
-1. Process queries containing context data (table schemas, code snippets, data samples)
-2. Analyze the provided context based on embedded instructions
-3. Provide detailed, structured answers optimized for further processing
-
-You can handle around 500K characters in your context window. When receiving batched records,
-analyze them efficiently and return consolidated findings.
-
-Always structure your responses clearly with:
-- Key findings
-- Specific recommendations
-- Confidence levels (HIGH/MEDIUM/LOW) where applicable""",
-)
-
 # Databricks Analyst sub-agent: Primary agent for data discovery and code generation
+# This agent now uses delegate_code_results() for the RLM workflow
 databricks_analyst = LlmAgent(
     name="databricks_analyst",
     model="gemini-3-pro-preview",
     instruction=ROOT_AGENT_INSTRUCTION,
     tools=[
-        FunctionTool(save_python_code),
         FunctionTool(save_artifact_to_volumes),
-        FunctionTool(llm_query),
         FunctionTool(exit_loop),
+        FunctionTool(delegate_code_results),  # RLM workflow delegation tool
+        FunctionTool(repo_filename_search),   # Search repo file metadata
+        FunctionTool(metadata_keyword_search),  # Search UC table metadata
+        FunctionTool(get_repo_file),          # Download files from GitHub
     ]
+)
+
+# Job Builder Agent: Deterministic agent for Job_B submission
+# This agent doesn't use an LLM - it executes pure Python logic
+job_builder = JobBuilderAgent(
+    name="job_builder",
+    # executor_job_id is read from ADK_EXECUTOR_JOB_ID env var
+    # catalog and schema are read from env vars
+)
+
+# Results Processor Agent: Analyzes execution results with injected context
+# The context_injection_plugin injects stdout/stderr and sublm_instruction
+results_processor_agent = LlmAgent(
+    name="results_processor",
+    model="gemini-3-pro-preview",
+    instruction="""You are a specialist sub-agent for processing code execution results.
+
+Your role is to:
+1. Analyze the execution output (stdout/stderr) provided to you
+2. Follow the analysis instruction that was specified when the code was delegated
+3. Summarize findings and provide actionable recommendations
+4. Identify any errors and suggest fixes if execution failed
+
+When analyzing results:
+- Look for patterns, anomalies, and key data points
+- Compare results against the original analysis goals
+- Provide clear, structured summaries
+- If the execution failed, analyze the error and suggest corrections
+
+Structure your response with:
+- **Summary**: Brief overview of the execution result
+- **Key Findings**: Main insights from the output
+- **Recommendations**: Next steps or actions to take
+- **Issues** (if any): Problems identified and suggested fixes""",
 )
 
 # =============================================================================
@@ -122,44 +215,78 @@ databricks_analyst = LlmAgent(
 # =============================================================================
 
 # Orchestrator Loop: Iteratively executes sub-agents until completion or max_iterations
+# Agent sequence: databricks_analyst -> job_builder -> results_processor
 root_agent = LoopAgent(
     name="orchestrator_loop",
     max_iterations=10,
-    sub_agents=[databricks_analyst, llm_query_agent]
+    sub_agents=[
+        databricks_analyst,       # 1. Generates code, calls delegate_code_results()
+        job_builder,              # 2. Submits Job_B, waits, writes results
+        results_processor_agent,  # 3. Processes with injected context
+    ]
 )
 
+# =============================================================================
+# App Configuration
+# =============================================================================
+
 # Wrap the agent in the google-adk App class
-# Available Plugins (3 total):
+# Available Plugins (8 total):
 #   1. UcDeltaTelemetryPlugin     - UC Delta telemetry persistence + stdout logging (DEFAULT)
 #   2. LoggingPlugin              - Standard runtime logging at workflow callback points
 #   3. GlobalInstructionPlugin    - Injects global instructions into all agent interactions
+#   4. UcToolExecutionSafetyPlugin - Blocks destructive SQL/shell operations
+#   5. FormattingCheckPlugin      - Validates delegation blob format
+#   6. CodeLintingPlugin          - Validates Python syntax before execution
+#   7. RlmContextInjectionPlugin  - Injects execution context to results_processor_agent
+#   8. RlmContextPruningPlugin    - Clears state after results_processor_agent completes
 #
 # Note: UcDeltaTelemetryPlugin is the default. Set ADK_USE_LOGGING_PLUGIN=1 to use LoggingPlugin instead.
 app = App(
     name="adk_poc_plugins",
     root_agent=root_agent,
     plugins=[
-        logging_plugin,            # UcDeltaTelemetryPlugin (default) or LoggingPlugin
-        global_instruction_plugin, # GlobalInstructionPlugin
+        # Step 1: Safety - Block destructive operations first
+        safety_plugin,
+        # Step 2: Validation - Format check before processing
+        formatting_plugin,
+        # Step 3: Validation - Syntax check before execution
+        linting_plugin,
+        # Step 4: Telemetry and logging
+        logging_plugin,
+        # Step 5: Global instructions
+        global_instruction_plugin,
+        # Step 6: Context injection for results_processor
+        context_injection_plugin,
+        # Step 7: Context pruning after results_processor
+        context_pruning_plugin,
     ]
 )
 
 # Export key components for use by run.py and other entry points
 __all__ = [
     # Agents
-    "root_agent",           # LoopAgent orchestrator (orchestrator_loop)
-    "databricks_analyst",   # LlmAgent for data analysis and code generation
-    "llm_query_agent",      # LlmAgent for semantic analysis queries
+    "root_agent",               # LoopAgent orchestrator (orchestrator_loop)
+    "databricks_analyst",       # LlmAgent for data analysis and code generation
+    "job_builder",              # BaseAgent for Job_B submission
+    "results_processor_agent",  # LlmAgent for processing execution results
     # App
     "app",
     # Plugins
     "logging_plugin",
     "global_instruction_plugin",
+    "safety_plugin",
+    "formatting_plugin",
+    "linting_plugin",
+    "context_injection_plugin",
+    "context_pruning_plugin",
     # Tools
-    "save_python_code",
     "save_artifact_to_volumes",
-    "llm_query",
     "exit_loop",
+    "delegate_code_results",
+    "repo_filename_search",
+    "metadata_keyword_search",
+    "get_repo_file",
     # Plugin factories
     "get_logging_plugin",
     "get_telemetry_plugin",

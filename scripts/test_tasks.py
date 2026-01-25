@@ -1,11 +1,20 @@
 """
 Progressive difficulty test tasks for evaluating databricks_analyst agent.
 
-Each task is designed to benefit from the llm_query tool to avoid context rot:
-- Large result sets that need summarization before proceeding
+Each task is designed to benefit from the delegate_code_results tool to avoid context rot:
+- Large result sets that need execution and summarization via downstream agents
 - Schema discovery tasks requiring interpretation of metadata
 - Multi-step analysis where intermediate findings inform next steps
 - Pattern recognition across large datasets
+
+Available Tools:
+- delegate_code_results: Delegates code execution to job_builder and result 
+  processing to results_processor_agent
+- metadata_keyword_search: Searches Unity Catalog metadata for columns/tables
+- repo_filename_search: Searches repository files by pattern
+- get_repo_file: Downloads files from GitHub repos to UC Volumes
+- save_artifact_to_volumes: Saves artifacts to UC Volumes
+- exit_loop: Terminates the LoopAgent iteration
 
 Difficulty Scale (1-10):
   1-2: Simple queries, minimal joins
@@ -29,7 +38,7 @@ class TestTask:
     priority: str = "Medium"
     story_points: float = 3.0
     expected_tables: list[str] = None  # Tables the agent should discover/use
-    llm_query_benefit: str = ""  # Why llm_query helps for this task
+    delegation_benefit: str = ""  # Why delegate_code_results helps for this task
 
 
 # =============================================================================
@@ -54,7 +63,7 @@ This is a warmup task to verify basic SQL execution capability.
     priority="Low",
     story_points=1.0,
     expected_tables=["silo_dev_rs.dbo.vendors"],
-    llm_query_benefit="Minimal - simple query, but validates llm_query can explain results"
+    delegation_benefit="Minimal - simple query, direct execution sufficient"
 )
 
 
@@ -84,7 +93,7 @@ AND have a website URL populated.
     priority="Low",
     story_points=2.0,
     expected_tables=["silo_dev_rs.dbo.vendors"],
-    llm_query_benefit="Use llm_query to summarize URL patterns from sample data"
+    delegation_benefit="Use delegate_code_results to summarize URL patterns from sample data"
 )
 
 
@@ -110,13 +119,13 @@ in the silo_dev_rs.dbo.vendors table.
 - Insights provided about data distribution patterns
 - Identify any data quality issues (e.g., NULL values, unexpected categories)
 
-Use llm_query to synthesize findings into actionable insights rather than
+Use delegate_code_results to synthesize findings into actionable insights rather than
 dumping raw aggregation results.
 """,
     priority="Medium",
     story_points=3.0,
     expected_tables=["silo_dev_rs.dbo.vendors"],
-    llm_query_benefit="Synthesize multiple aggregation results into coherent narrative"
+    delegation_benefit="Synthesize multiple aggregation results into coherent narrative"
 )
 
 
@@ -144,12 +153,12 @@ silo_dev_rs.dbo.vendors with silo_dev_rs.dbo.locations.
 - Summary interpretation of vendor coverage
 
 **Note:** Focus on non-deleted records (DeletedUTC IS NULL).
-Use llm_query to interpret findings and identify data quality concerns.
+Use delegate_code_results to interpret findings and identify data quality concerns.
 """,
     priority="Medium",
     story_points=5.0,
     expected_tables=["silo_dev_rs.dbo.vendors", "silo_dev_rs.dbo.locations"],
-    llm_query_benefit="Interpret geographic patterns and coverage gaps from multi-query results"
+    delegation_benefit="Interpret geographic patterns and coverage gaps from multi-query results"
 )
 
 
@@ -179,7 +188,7 @@ the quality and patterns of AI-assisted vendor matching.
 - Insights into human vs algorithmic matching behavior
 - Data quality observations
 
-This task requires multiple queries with synthesis. Use llm_query to:
+This task requires multiple queries with synthesis. Use delegate_code_results to:
 - Interpret confidence score patterns
 - Summarize human decision-making patterns
 - Identify potential process improvements
@@ -187,7 +196,7 @@ This task requires multiple queries with synthesis. Use llm_query to:
     priority="Medium",
     story_points=5.0,
     expected_tables=["silo_dev_rs.task.ai_vendor_match_enriched"],
-    llm_query_benefit="Essential for synthesizing multi-faceted analysis into coherent insights"
+    delegation_benefit="Essential for synthesizing multi-faceted analysis into coherent insights"
 )
 
 
@@ -218,12 +227,12 @@ all tables in the silo_dev_rs catalog that contain tax-related information
 **Hint:** The columnnames table has columns: path (catalog.schema.table) and
 column_array (JSON array of "COLUMN_NAME (TYPE)" strings).
 
-Use llm_query to parse the column_array JSON and categorize findings efficiently.
+Use delegate_code_results to parse the column_array JSON and categorize findings efficiently.
 """,
     priority="Medium",
     story_points=5.0,
     expected_tables=["silo_dev_rs.metadata.columnnames"],
-    llm_query_benefit="Parse and categorize JSON column metadata, synthesize findings across many tables"
+    delegation_benefit="Parse and categorize JSON column metadata, synthesize findings across many tables"
 )
 
 
@@ -261,7 +270,7 @@ This is a complex investigation requiring:
 - Multiple table explorations
 - Synthesis into coherent lineage documentation
 
-Use llm_query to parse view SQL, extract table references, and build the lineage narrative.
+Use delegate_code_results to parse view SQL, extract table references, and build the lineage narrative.
 """,
     priority="High",
     story_points=8.0,
@@ -273,7 +282,7 @@ Use llm_query to parse view SQL, extract table references, and build the lineage
         "silo_dev_rs.dbo.vendors",
         "silo_dev_rs.dbo.auditjobmatchentities"
     ],
-    llm_query_benefit="Parse complex view SQL, maintain context across many table explorations"
+    delegation_benefit="Parse complex view SQL, maintain context across many table explorations"
 )
 
 
@@ -318,7 +327,7 @@ silo_dev_rs.workflow schema to identify execution patterns and bottlenecks.
 - Data-driven recommendations provided
 - Clear identification of bottlenecks
 
-This task requires extensive exploration and synthesis. Use llm_query to:
+This task requires extensive exploration and synthesis. Use delegate_code_results to:
 - Parse JSON phase data
 - Correlate findings across multiple tables
 - Generate actionable recommendations
@@ -331,7 +340,7 @@ This task requires extensive exploration and synthesis. Use llm_query to:
         "silo_dev_rs.workflow.v_implementation_progress",
         "silo_dev_rs.workflow.v_workflow_summary"
     ],
-    llm_query_benefit="Critical for JSON parsing, cross-table correlation, and recommendation synthesis"
+    delegation_benefit="Critical for JSON parsing, cross-table correlation, and recommendation synthesis"
 )
 
 
@@ -388,7 +397,7 @@ between master data (silo_dev_rs.dbo.vendors) and matching workflow data
 - Actionable recommendations
 
 This is a complex, iterative investigation requiring many queries and synthesis.
-Use llm_query extensively to:
+Use delegate_code_results extensively to:
 - Interpret name similarity patterns
 - Categorize discrepancy types
 - Build the prioritized recommendation list
@@ -401,7 +410,7 @@ Use llm_query extensively to:
         "silo_dev_rs.dbo.locations",
         "silo_dev_rs.dbo.vendortins"
     ],
-    llm_query_benefit="Essential for pattern recognition, categorization, and recommendation synthesis"
+    delegation_benefit="Essential for pattern recognition, categorization, and recommendation synthesis"
 )
 
 
@@ -472,13 +481,13 @@ Produce a structured report suitable for a data governance team. Include:
 - Actionable recommendations for data governance
 
 This is the most complex task requiring extensive exploration, synthesis, and
-documentation. The agent MUST use llm_query to:
+documentation. The agent MUST use delegate_code_results to:
 - Summarize intermediate findings to avoid context rot
 - Build progressive documentation
 - Synthesize cross-schema patterns
 - Generate the final structured report
 
-Without llm_query, context will exceed limits before completion.
+Without delegate_code_results, context will exceed limits before completion.
 """,
     priority="High",
     story_points=21.0,
@@ -487,7 +496,7 @@ Without llm_query, context will exceed limits before completion.
         "silo_dev_rs.information_schema.*",
         "All tables in silo_dev_rs.*"
     ],
-    llm_query_benefit="Absolutely required - impossible to complete without intermediate summarization"
+    delegation_benefit="Absolutely required - impossible to complete without intermediate summarization"
 )
 
 
@@ -518,6 +527,46 @@ def list_tasks() -> list[tuple[int, str, str]]:
     return [(d, t.issue_key, t.summary) for d, t in sorted(TASKS.items())]
 
 
+def format_task_as_prompt(task: TestTask) -> str:
+    """Format a TestTask as a prompt string for direct agent invocation.
+
+    This bypasses the ingestor polling mechanism for direct E2E testing.
+
+    Args:
+        task: A TestTask instance to format.
+
+    Returns:
+        Formatted prompt string including issue metadata and description.
+    """
+    return f"""## Task: {task.issue_key} - {task.summary}
+
+**Priority:** {task.priority}
+**Story Points:** {task.story_points}
+**Difficulty Level:** {task.difficulty}/10
+
+### Description
+{task.description}
+
+### Delegation Guidance
+{task.delegation_benefit}
+"""
+
+
+def get_task_prompt(difficulty: int) -> Optional[str]:
+    """Get a formatted prompt for a test task by difficulty level.
+
+    Args:
+        difficulty: Task difficulty level (1-10).
+
+    Returns:
+        Formatted prompt string, or None if level not found.
+    """
+    task = get_task(difficulty)
+    if task:
+        return format_task_as_prompt(task)
+    return None
+
+
 if __name__ == "__main__":
     # Print task summary when run directly
     print("=" * 70)
@@ -528,5 +577,5 @@ if __name__ == "__main__":
         print(f"\nLevel {difficulty}: {issue_key}")
         print(f"  Summary: {summary}")
         print(f"  Priority: {task.priority} | Story Points: {task.story_points}")
-        print(f"  LLM Query Benefit: {task.llm_query_benefit[:60]}...")
+        print(f"  Delegation Benefit: {task.delegation_benefit[:60]}...")
     print("\n" + "=" * 70)

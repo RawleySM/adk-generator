@@ -60,8 +60,11 @@ Examples:
   # Run with custom timeout (2 hours)
   %(prog)s --job-id 12345 --timeout 120
 
-  # Run with job parameters
+  # Run with job parameters (inline prompt)
   %(prog)s --job-id 12345 --param ADK_SESSION_ID=test_001 --param ADK_PROMPT="Hello"
+
+  # Run with prompt from file (literal prompt takes precedence if both are set)
+  %(prog)s --job-id 12345 --param ADK_PROMPT_FILE=/Volumes/silo_dev_rs/task/task_txt/task.txt
         """,
     )
 

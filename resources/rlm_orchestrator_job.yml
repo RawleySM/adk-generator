@@ -51,6 +51,8 @@ resources:
           default: ${var.secret_scope}
         - name: ADK_PROMPT
           default: ""  # User prompt - passed via run-now or trigger
+        - name: ADK_PROMPT_FILE
+          default: "/Volumes/silo_dev_rs/task/task_txt/task.txt"  # Path to prompt file (used if ADK_PROMPT is empty)
         - name: ADK_SESSION_ID
           default: "session_001"
         - name: ADK_USER_ID

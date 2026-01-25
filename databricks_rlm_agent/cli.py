@@ -26,11 +26,16 @@ def _setup_logging():
     """Configure logging for CLI execution."""
     import logging
 
-    log_level = os.environ.get("ADK_LOG_LEVEL", "INFO").upper()
+    log_level = os.environ.get("ADK_LOG_LEVEL", "DEBUG").upper()
     logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
+        level=getattr(logging, log_level, logging.DEBUG),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+    # Suppress noisy py4j logging (PySpark's Py4J bridge)
+    logging.getLogger("py4j").setLevel(logging.WARNING)
+    logging.getLogger("py4j.clientserver").setLevel(logging.WARNING)
+
     return logging.getLogger(__name__)
 
 
@@ -148,6 +153,40 @@ def _get_spark_session():
     return SparkSession.builder.getOrCreate()
 
 
+def _read_prompt_file(prompt_file: str) -> str:
+    """Read prompt text from a file (UC Volumes, DBFS, or local).
+
+    Args:
+        prompt_file: Path to the prompt file (e.g., /Volumes/silo_dev_rs/task/task_txt/task.txt).
+
+    Returns:
+        The prompt text with leading/trailing whitespace stripped.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        IOError: If the file cannot be read.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"[PROMPT_FILE] Reading prompt from: {prompt_file}")
+
+    try:
+        with open(prompt_file, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if not content:
+            logger.warning(f"[PROMPT_FILE] File exists but is empty: {prompt_file}")
+        else:
+            logger.info(f"[PROMPT_FILE] Loaded {len(content)} characters from {prompt_file}")
+        return content
+    except FileNotFoundError:
+        logger.error(f"[PROMPT_FILE] File not found: {prompt_file}")
+        raise
+    except Exception as e:
+        logger.error(f"[PROMPT_FILE] Failed to read file {prompt_file}: {e}")
+        raise IOError(f"Cannot read prompt file: {prompt_file}") from e
+
+
 # =============================================================================
 # Job_A: Orchestrator Entrypoint
 # =============================================================================
@@ -194,10 +233,25 @@ def orchestrator_main():
         help="Optional prompt to send to the agent",
     )
     parser.add_argument(
+        "--prompt-file",
+        default=None,
+        help="Path to a file containing the prompt (UC Volumes, DBFS, or local). "
+             "Only used if --prompt is not provided. "
+             "Default: /Volumes/silo_dev_rs/task/task_txt/task.txt",
+    )
+    parser.add_argument(
         "--max-iterations",
         type=int,
         default=None,
         help="Maximum number of orchestration iterations",
+    )
+    parser.add_argument(
+        "--test-level",
+        type=int,
+        default=None,
+        choices=range(1, 11),
+        metavar="1-10",
+        help="Load test task by difficulty level (1-10) from test_tasks.py, bypassing ingestor polling",
     )
 
     args = parser.parse_args()
@@ -209,6 +263,38 @@ def orchestrator_main():
     args.user_id = args.user_id or _get_job_parameter("ADK_USER_ID", "job_user")
     args.prompt = args.prompt or _get_job_parameter("ADK_PROMPT", "")
     args.max_iterations = args.max_iterations or int(_get_job_parameter("ADK_MAX_ITERATIONS", "1"))
+
+    # Resolve prompt file: CLI arg -> job parameter -> default path
+    args.prompt_file = args.prompt_file or _get_job_parameter(
+        "ADK_PROMPT_FILE", "/Volumes/silo_dev_rs/task/task_txt/task.txt"
+    )
+
+    # Precedence: literal prompt wins; only read from file if prompt is empty
+    if not args.prompt and args.prompt_file:
+        try:
+            args.prompt = _read_prompt_file(args.prompt_file)
+            logger.info(f"Loaded prompt from file: {args.prompt_file}")
+        except FileNotFoundError:
+            logger.warning(f"Prompt file not found: {args.prompt_file} (continuing without prompt)")
+        except IOError as e:
+            logger.error(f"Failed to read prompt file: {e}")
+            sys.exit(1)
+
+    # Load test task if --test-level is specified (bypasses ingestor polling)
+    if args.test_level is not None:
+        try:
+            from .test_tasks import get_task_prompt
+            test_prompt = get_task_prompt(args.test_level)
+            if test_prompt:
+                args.prompt = test_prompt
+                args.session_id = f"test_level_{args.test_level}_{args.session_id}"
+                logger.info(f"Loaded test task level {args.test_level} (bypassing ingestor)")
+            else:
+                logger.error(f"No test task found for level {args.test_level}")
+                sys.exit(1)
+        except ImportError as e:
+            logger.error(f"Could not import test_tasks module: {e}")
+            sys.exit(1)
     
     logger.info(f"Configuration:")
     logger.info(f"  Catalog: {args.catalog}")
@@ -216,6 +302,7 @@ def orchestrator_main():
     logger.info(f"  Session ID: {args.session_id}")
     logger.info(f"  User ID: {args.user_id}")
     logger.info(f"  Prompt: {args.prompt[:100] if args.prompt else '(empty)'}...")
+    logger.info(f"  Prompt File: {args.prompt_file}")
     logger.info(f"  Max Iterations: {args.max_iterations}")
     
     # Run the orchestrator
@@ -252,7 +339,7 @@ async def _run_orchestrator(args, logger) -> int:
     from .executor import find_result_json, load_result_json
     from .jobs_api import submit_and_wait
     from .prompts import format_execution_feedback
-    from .agent import AGENT_CODE_PATH
+    from .tools.save_python_code import AGENT_CODE_PATH
     
     spark = _get_spark_session()
     
@@ -830,6 +917,116 @@ async def _run_ingestor(args, logger) -> int:
 
     # Return non-zero if there were errors
     return 0 if result["status"] == "success" else 1
+
+
+# =============================================================================
+# Test Runner Entrypoint
+# =============================================================================
+
+def test_main():
+    """Main entrypoint for running test tasks directly.
+
+    This is a convenience wrapper around the orchestrator that:
+    - Requires a --level argument (1-10)
+    - Bypasses the ingestor polling mechanism
+    - Provides sensible defaults for test runs
+
+    Usage:
+        rlm-test --level 3
+        rlm-test --level 5 --max-iterations 5
+    """
+    logger = _setup_logging()
+    logger.info("=" * 60)
+    logger.info("RLM Test Runner")
+    logger.info("=" * 60)
+
+    parser = argparse.ArgumentParser(
+        description="RLM Agent Test Runner - run test tasks directly",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Test Levels:
+  1-2:  Simple queries, minimal joins
+  3-4:  Aggregations, basic joins, filtering
+  5-6:  Multi-table analysis, metadata exploration
+  7-8:  Cross-schema investigation, data quality analysis
+  9-10: Complex workflow analysis, iterative exploration
+
+Examples:
+  rlm-test --level 1                    # Run simple vendor count
+  rlm-test --level 5 --max-iterations 5 # Run profiling task with retries
+  rlm-test --list                       # List all available test tasks
+"""
+    )
+    parser.add_argument(
+        "--level",
+        type=int,
+        choices=range(1, 11),
+        metavar="1-10",
+        help="Test task difficulty level (required unless --list)",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List all available test tasks and exit",
+    )
+    parser.add_argument(
+        "--catalog",
+        default=os.environ.get("ADK_DELTA_CATALOG", "silo_dev_rs"),
+        help="Unity Catalog name for session tables",
+    )
+    parser.add_argument(
+        "--schema",
+        default=os.environ.get("ADK_DELTA_SCHEMA", "adk"),
+        help="Schema name within the catalog",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=3,
+        help="Maximum number of orchestration iterations (default: 3)",
+    )
+    parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Session identifier (auto-generated if not specified)",
+    )
+
+    args = parser.parse_args()
+
+    # Handle --list
+    if args.list:
+        from .test_tasks import list_tasks
+        print("\nAvailable Test Tasks:")
+        print("=" * 70)
+        for level, issue_key, summary in list_tasks():
+            print(f"  Level {level:2d}: [{issue_key}] {summary}")
+        print("=" * 70)
+        return
+
+    # Require --level if not --list
+    if args.level is None:
+        parser.error("--level is required (use --list to see available tasks)")
+
+    # Generate session ID if not provided
+    if args.session_id is None:
+        import time
+        args.session_id = f"test_L{args.level}_{int(time.time())}"
+
+    logger.info(f"Running test level {args.level}")
+    logger.info(f"Session ID: {args.session_id}")
+    logger.info(f"Max iterations: {args.max_iterations}")
+
+    # Delegate to orchestrator with --test-level
+    sys.argv = [
+        "rlm-orchestrator",
+        "--test-level", str(args.level),
+        "--catalog", args.catalog,
+        "--schema", args.schema,
+        "--session-id", args.session_id,
+        "--max-iterations", str(args.max_iterations),
+    ]
+
+    orchestrator_main()
 
 
 if __name__ == "__main__":

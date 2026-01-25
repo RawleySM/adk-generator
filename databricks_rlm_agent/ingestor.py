@@ -294,22 +294,26 @@ class IngestorService:
             for row in rows:
                 # Extract fields with fallbacks for different schemas
                 issue_key = (
+                    getattr(row, "ISSUEKEY", None) or
                     getattr(row, "KEY", None) or
                     getattr(row, "key", None) or
                     getattr(row, "issue_key", None) or
                     str(uuid.uuid4())[:8]
                 )
                 summary = (
+                    getattr(row, "SUMMARY__summary", None) or
                     getattr(row, "SUMMARY", None) or
                     getattr(row, "summary", None) or
                     ""
                 )
                 description = (
+                    getattr(row, "DESCRIPTION__description", None) or
                     getattr(row, "DESCRIPTION", None) or
                     getattr(row, "description", None) or
                     ""
                 )
                 status = (
+                    getattr(row, "STATUS__status", None) or
                     getattr(row, "STATUS", None) or
                     getattr(row, "status", None) or
                     "Unknown"

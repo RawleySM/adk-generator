@@ -129,7 +129,7 @@ def repo_filename_search(
               - total_count: Total matches found
               - columns: Column names returned
               - message: Human-readable summary
-              - suggestion: If >5 results, suggests refinement or llm_query()
+              - suggestion: If >5 results, suggests refinement or delegate_code_results()
     """
     from databricks.sdk import WorkspaceClient
     import time
@@ -286,7 +286,7 @@ def repo_filename_search(
                 f"1. Add filetype_filter to narrow by extension (e.g., 'py', 'sql')\n"
                 f"2. Add table_filter to find files referencing specific tables\n"
                 f"3. Use more specific keywords\n"
-                f"4. Use llm_query() to analyze the full result set with:\n"
+                f"4. Use delegate_code_results() to analyze the full result set by executing:\n"
                 f"   SELECT * FROM {target_table} WHERE {where_clause}"
             )
 

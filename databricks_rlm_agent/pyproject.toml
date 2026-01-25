@@ -1,6 +1,6 @@
 [project]
 name = "databricks_rlm_agent"
-version = "0.1.22"
+version = "0.1.34"
 description = "RLM Agent for Databricks with Delta session persistence - Two-job orchestrator/executor pattern"
 requires-python = ">=3.10"
 dependencies = [
@@ -22,6 +22,7 @@ dev = [
 rlm-orchestrator = "databricks_rlm_agent.cli:orchestrator_main"
 rlm-executor = "databricks_rlm_agent.cli:executor_main"
 rlm-ingestor = "databricks_rlm_agent.cli:ingestor_main"
+rlm-test = "databricks_rlm_agent.cli:test_main"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -29,9 +30,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 # Map package name to current directory since pyproject.toml is in the package directory
-package-dir = {"databricks_rlm_agent" = ".", "databricks_rlm_agent.sessions" = "sessions", "databricks_rlm_agent.plugins" = "plugins", "databricks_rlm_agent.tools" = "tools"}
-packages = ["databricks_rlm_agent", "databricks_rlm_agent.sessions", "databricks_rlm_agent.plugins", "databricks_rlm_agent.tools"]
+package-dir = {"databricks_rlm_agent" = ".", "databricks_rlm_agent.sessions" = "sessions", "databricks_rlm_agent.plugins" = "plugins", "databricks_rlm_agent.tools" = "tools", "databricks_rlm_agent.utils" = "utils", "databricks_rlm_agent.agents" = "agents"}
+packages = ["databricks_rlm_agent", "databricks_rlm_agent.sessions", "databricks_rlm_agent.plugins", "databricks_rlm_agent.tools", "databricks_rlm_agent.utils", "databricks_rlm_agent.agents"]
 
 [tool.setuptools.package-data]
-databricks_rlm_agent = ["*.py"]
+databricks_rlm_agent = ["*.py", "test_tasks.py"]
 

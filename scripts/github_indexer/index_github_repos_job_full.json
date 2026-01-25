@@ -1,0 +1,16 @@
+{
+  "name": "index_github_repos_job_full",
+  "tasks": [
+    {
+      "task_key": "index_repos_task",
+      "existing_cluster_id": "1115-120035-jyzgoasz",
+      "spark_python_task": {
+        "python_file": "dbfs:/tmp/spendmend/github_catalog_indexer.py",
+        "parameters": [
+          "${GITHUB_TOKEN}",
+          "Spendmend"
+        ]
+      }
+    }
+  ]
+}
