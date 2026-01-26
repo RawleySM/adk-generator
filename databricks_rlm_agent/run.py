@@ -29,6 +29,7 @@ Secrets Configuration:
 
 import asyncio
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 from google.adk.runners import Runner
@@ -37,6 +38,26 @@ from google.genai import types
 
 from .sessions import DeltaSessionService
 from .secrets import load_secrets, validate_secrets
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationResult:
+    """Structured result from run_conversation().
+
+    This avoids the broken pattern where cli.py reloads session state after
+    the run and checks temp:* keys (which DeltaSessionService never persists).
+
+    Attributes:
+        response_text: The agent's response text.
+        status: One of "success", "exit_loop", or "fatal_error".
+        fatal_error_msg: Human-readable error message if status is "fatal_error".
+        delegation_count: Number of delegation escalations (delegate_code_results).
+    """
+
+    response_text: str
+    status: str  # "success" | "exit_loop" | "fatal_error"
+    fatal_error_msg: Optional[str] = None
+    delegation_count: int = 0
 
 
 # Configuration from environment or defaults
@@ -104,8 +125,14 @@ async def create_runner(
     # the google.adk/google.genai clients are initialized
     from .agent import (
         root_agent,
-        logging_plugin,
-        global_instruction_plugin,
+        # Full plugin chain - order matters for execution sequence
+        safety_plugin,              # 1. Block destructive operations first
+        formatting_plugin,          # 2. Validate delegation blob format
+        linting_plugin,             # 3. Validate Python syntax before execution
+        logging_plugin,             # 4. Telemetry and logging (UC Delta or stdout)
+        global_instruction_plugin,  # 5. Inject global instructions
+        context_injection_plugin,   # 6. Inject execution context to results_processor
+        context_pruning_plugin,     # 7. Clear state after results_processor completes
     )
 
     # Initialize Delta session service
@@ -121,15 +148,28 @@ async def create_runner(
     artifact_service = InMemoryArtifactService()
     print(f"[ARTIFACTS] Using InMemoryArtifactService for artifact storage")
 
-    # Create Runner with session service, artifact service, and plugins
+    # Create Runner with session service, artifact service, and full plugin chain
+    # Plugin order mirrors agent.py App configuration:
+    #   1. Safety - Block destructive operations first
+    #   2. Formatting - Validate delegation blob format
+    #   3. Linting - Validate Python syntax before execution
+    #   4. Logging/Telemetry - Record events
+    #   5. Global Instructions - Inject system prompts
+    #   6. Context Injection - Inject execution results for results_processor
+    #   7. Context Pruning - Clear state after results_processor
     runner = Runner(
         agent=root_agent,
         app_name=APP_NAME,
         session_service=session_service,
         artifact_service=artifact_service,  # Enables context.save_artifact/load_artifact
         plugins=[
+            safety_plugin,
+            formatting_plugin,
+            linting_plugin,
             logging_plugin,
             global_instruction_plugin,
+            context_injection_plugin,
+            context_pruning_plugin,
         ],
     )
 
@@ -142,9 +182,9 @@ async def run_conversation(
     user_id: str,
     session_id: str,
     prompt: str,
-    timeout_seconds: float = 120.0,
-    event_timeout_seconds: float = 60.0,
-) -> str:
+    timeout_seconds: float = 900.0,
+    event_timeout_seconds: float = 300.0,
+) -> ConversationResult:
     """Run a single conversation turn with timeout protection.
 
     Args:
@@ -154,23 +194,37 @@ async def run_conversation(
         session_id: Session identifier.
         prompt: User prompt text.
         timeout_seconds: Maximum total time for the entire conversation turn.
-            Defaults to 300 seconds (5 minutes).
+            Defaults to 900 seconds (15 minutes).
         event_timeout_seconds: Maximum time to wait between events from the
             stream. If no event is received within this time, the conversation
-            is considered stalled. Defaults to 60 seconds.
+            is considered stalled. Defaults to 300 seconds (5 minutes).
 
     Returns:
-        The agent's response text.
+        ConversationResult with response_text, status, fatal_error_msg, and delegation_count.
 
     Raises:
         asyncio.TimeoutError: If the conversation exceeds timeout_seconds or
             if no events are received within event_timeout_seconds.
     """
     final_response = "No response generated."
+    last_text_response = None  # Track the last text response seen
+    exit_loop_detected = False  # Track if exit_loop was called (vs delegate_code_results)
+    fatal_error_detected = False  # Track if a fatal error was encountered
+    fatal_error_msg = None  # Human-readable fatal error message
+    delegation_count = 0  # Track delegation escalations (delegate_code_results)
+
+    # NOTE: Previous versions had cleanup logic here that appended an Event with
+    # role="user" content to clear stale escalation keys. This was removed because:
+    # 1. It pollutes conversation history (model sees "[System cleanup: ...]" as user utterance)
+    # 2. temp:rlm:* keys auto-discard after invocation, so cleanup is unnecessary
+    # 3. Legacy rlm:* keys will be phased out; accepting minor stale-flag risk during migration
+    #
+    # If stale escalation flags cause issues, the proper fix is to ensure the pruning
+    # plugin runs even after fatal errors, not to inject fake user messages.
 
     async def _iterate_with_event_timeout():
         """Iterate over events with per-event timeout watchdog."""
-        nonlocal final_response
+        nonlocal final_response, last_text_response, exit_loop_detected, fatal_error_detected, fatal_error_msg, delegation_count
         event_iter = runner.run_async(
             user_id=user_id,
             session_id=session_id,
@@ -187,14 +241,83 @@ async def run_conversation(
                     event_iter.__anext__(),
                     timeout=event_timeout_seconds,
                 )
+                # Track all text responses - even if not marked as "final"
+                # This handles cases where escalation triggers before final response
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            last_text_response = part.text
+
+                # Check for escalation events and distinguish fatal errors, exit_loop, and delegation
+                # Priority: fatal_error > exit_loop > delegation
+                # - fatal_error: unrecoverable workflow failure from JobBuilderAgent
+                # - exit_loop: sets temp:rlm:exit_requested=True in state, signals intentional loop termination
+                # - delegate_code_results: escalates to advance to job_builder sub-agent
+                if hasattr(event, 'actions') and event.actions and getattr(event.actions, 'escalate', False):
+                    author = getattr(event, 'author', 'unknown')
+                    state_delta = getattr(event.actions, 'state_delta', {}) or {}
+
+                    # Check escalation type (priority: fatal > exit_loop > delegation)
+                    # Check both temp:rlm:* (new) and rlm:* (legacy) keys for migration
+                    is_fatal = (
+                        state_delta.get('temp:rlm:fatal_error', False) or
+                        state_delta.get('rlm:fatal_error', False)
+                    )
+                    is_exit_loop = (
+                        state_delta.get('temp:rlm:exit_requested', False) or
+                        state_delta.get('rlm:exit_requested', False)
+                    )
+                    
+                    if is_fatal:
+                        fatal_error_detected = True
+                        # Check both temp:rlm:* (new) and rlm:* (legacy) keys for error message
+                        fatal_error_msg = (
+                            state_delta.get('temp:rlm:fatal_error_msg') or
+                            state_delta.get('rlm:fatal_error_msg', 'Unknown fatal error')
+                        )
+                        print(f"ERROR: Fatal error detected from {author}: {fatal_error_msg}")
+                        if last_text_response:
+                            final_response = last_text_response
+                    elif is_exit_loop:
+                        print(f"INFO: exit_loop termination detected from {author}")
+                        exit_loop_detected = True
+                        # Use last text response as the final response
+                        if last_text_response:
+                            final_response = last_text_response
+                    else:
+                        delegation_count += 1
+                        print(f"INFO: Delegation escalation #{delegation_count} from {author} (workflow continues)")
+                    # Continue processing remaining events - don't break here
+                    # The stream should end naturally after escalation
+
                 if event.is_final_response():
                     if event.content and event.content.parts:
                         final_response = event.content.parts[0].text
             except StopAsyncIteration:
-                # Stream completed normally
+                # Stream completed normally - use last text if no final response
+                if final_response == "No response generated." and last_text_response:
+                    final_response = last_text_response
+                if fatal_error_detected:
+                    print(f"INFO: Stream completed after fatal error")
+                elif exit_loop_detected:
+                    print(f"INFO: Stream completed after exit_loop (delegations: {delegation_count})")
+                elif delegation_count > 0:
+                    print(f"INFO: Stream completed after {delegation_count} delegation(s)")
                 break
             except asyncio.TimeoutError:
                 print(f"WARNING: Event stream stalled - no event received in {event_timeout_seconds}s")
+                # If we have a last text response, use it before raising
+                if last_text_response:
+                    final_response = last_text_response
+                    print(f"INFO: Using last captured text response before timeout")
+                # Forgive timeout if exit_loop was explicitly called or fatal error occurred
+                # (workflow is complete in both cases)
+                # Delegation escalations (delegate_code_results) should NOT forgive timeouts
+                # because the workflow is still in progress
+                if exit_loop_detected or fatal_error_detected:
+                    completion_reason = 'fatal error' if fatal_error_detected else 'exit_loop'
+                    print(f"INFO: Timeout after {completion_reason} - treating as completed")
+                    break
                 raise
 
     try:
@@ -207,7 +330,20 @@ async def run_conversation(
         print(f"ERROR: Conversation timed out after {timeout_seconds}s total or {event_timeout_seconds}s between events")
         raise
 
-    return final_response
+    # Determine status based on flags detected during event processing
+    if fatal_error_detected:
+        status = "fatal_error"
+    elif exit_loop_detected:
+        status = "exit_loop"
+    else:
+        status = "success"
+
+    return ConversationResult(
+        response_text=final_response,
+        status=status,
+        fatal_error_msg=fatal_error_msg,
+        delegation_count=delegation_count,
+    )
 
 
 async def main(
@@ -262,7 +398,7 @@ async def main(
     print("-" * 50)
 
     # Run the conversation
-    response = await run_conversation(
+    result = await run_conversation(
         runner=runner,
         session_service=session_service,
         user_id=user_id,
@@ -270,13 +406,18 @@ async def main(
         prompt=prompt,
     )
 
-    print(f"\nAgent: {response}")
+    print(f"\nAgent: {result.response_text}")
+    print(f"Status: {result.status}")
+    if result.fatal_error_msg:
+        print(f"Fatal Error: {result.fatal_error_msg}")
+    if result.delegation_count > 0:
+        print(f"Delegations: {result.delegation_count}")
     print("-" * 50)
 
     # Close session service
     await session_service.close()
 
-    return response
+    return result
 
 
 if __name__ == "__main__":

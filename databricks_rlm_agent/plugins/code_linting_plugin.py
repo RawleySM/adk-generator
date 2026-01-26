@@ -28,7 +28,7 @@ class CodeLintingPlugin(BasePlugin):
     """Plugin that validates Python syntax before code generation tools execute.
 
     This plugin implements a before_tool_callback that runs ast.parse() on
-    code passed to delegate_code_results and save_python_code tools.
+    code passed to delegate_code_results tool.
 
     If the code has syntax errors, the tool execution is blocked and a
     detailed error message is returned including the error location.
@@ -46,7 +46,7 @@ class CodeLintingPlugin(BasePlugin):
     """
 
     # Tools that should have their code linted
-    LINTED_TOOLS = {"delegate_code_results", "save_python_code"}
+    LINTED_TOOLS = {"delegate_code_results"}
 
     # Parameter names that contain code to lint
     CODE_PARAMETERS = {"code", "blob", "content"}

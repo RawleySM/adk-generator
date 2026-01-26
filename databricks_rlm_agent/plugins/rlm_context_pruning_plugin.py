@@ -5,8 +5,13 @@ that cleans up state after processing is complete.
 
 When results_processor_agent finishes, this plugin:
 1. Marks the artifact as consumed in the registry
-2. Clears temporary state keys (artifact_id, sublm_instruction, has_agent_code)
-3. Preserves the iteration counter for tracking
+2. Clears invocation-scoped state keys (both temp:rlm:* and legacy rlm:*)
+3. Preserves the session-scoped iteration counter for tracking
+
+State key design:
+- During migration, clears both temp:rlm:* and legacy rlm:* keys
+- After migration, temp:rlm:* keys auto-discard (clearing is defensive)
+- See plans/refactor_key_glue.md for the migration plan
 
 This prevents stale artifact data from affecting subsequent iterations
 and keeps the state clean for the next loop cycle.
@@ -26,15 +31,45 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Import state helpers for dual-read pattern
+from databricks_rlm_agent.utils.state_helpers import get_rlm_state
 
-# State keys to clear (must match delegate_code_results.py)
-STATE_ARTIFACT_ID = "rlm:artifact_id"
-STATE_SUBLM_INSTRUCTION = "rlm:sublm_instruction"
-STATE_HAS_AGENT_CODE = "rlm:has_agent_code"
+# State keys to check for artifact (dual-read)
+STATE_ARTIFACT_ID = "temp:rlm:artifact_id"
 STATE_TEMP_PARSED_BLOB = "temp:parsed_blob"
 
-# Additional state keys to clear
-ADDITIONAL_CLEAR_KEYS = [
+# Keys to clear during migration (both temp:rlm:* and legacy rlm:*)
+# After migration completes, temp:rlm:* keys auto-discard so this is defensive
+INVOCATION_KEYS_TO_CLEAR = [
+    # Delegation inputs (temp:rlm:*)
+    "temp:rlm:artifact_id",
+    "temp:rlm:sublm_instruction",
+    "temp:rlm:has_agent_code",
+    "temp:rlm:code_artifact_key",
+    "temp:rlm:session_id",
+    "temp:rlm:invocation_id",
+    # Execution results (temp:rlm:*)
+    "temp:rlm:execution_stdout",
+    "temp:rlm:execution_stderr",
+    "temp:rlm:execution_success",
+    "temp:rlm:databricks_run_id",
+    "temp:rlm:run_url",
+    "temp:rlm:result_json_path",
+    "temp:rlm:stdout_truncated",
+    "temp:rlm:stderr_truncated",
+    # Control flags (temp:rlm:*)
+    "temp:rlm:exit_requested",
+    "temp:rlm:fatal_error",
+    "temp:rlm:fatal_error_msg",
+    # Temp state
+    "temp:parsed_blob",
+]
+
+# Legacy keys to clear during migration (will be removed after migration)
+LEGACY_KEYS_TO_CLEAR = [
+    "rlm:artifact_id",
+    "rlm:sublm_instruction",
+    "rlm:has_agent_code",
     "rlm:code_artifact_key",
     "rlm:stdout_artifact_key",
     "rlm:stderr_artifact_key",
@@ -42,13 +77,18 @@ ADDITIONAL_CLEAR_KEYS = [
     "rlm:invocation_id",
     "rlm:execution_stdout",
     "rlm:execution_stderr",
-    # Keys set by JobBuilderAgent
     "rlm:execution_success",
     "rlm:databricks_run_id",
     "rlm:run_url",
+    "rlm:result_json_path",
+    "rlm:stdout_truncated",
+    "rlm:stderr_truncated",
+    "rlm:exit_requested",
+    "rlm:fatal_error",
+    "rlm:fatal_error_msg",
 ]
 
-# State keys to preserve
+# State keys to preserve (session-scoped)
 PRESERVED_KEYS = [
     "rlm:iteration",  # Keep the iteration counter
 ]
@@ -117,7 +157,8 @@ class RlmContextPruningPlugin(BasePlugin):
             return None
 
         # Check if we have an artifact to clean up
-        artifact_id = callback_context.state.get(STATE_ARTIFACT_ID)
+        # Use dual-read: try temp:rlm:* first, fall back to legacy rlm:*
+        artifact_id = get_rlm_state(callback_context.state, "artifact_id")
         if not artifact_id:
             self.skip_count += 1
             if self._enable_logging:
@@ -145,13 +186,10 @@ class RlmContextPruningPlugin(BasePlugin):
                     f"[{self.name}] Could not mark artifact as consumed: {e}"
                 )
 
-        # Clear temporary state keys
-        keys_to_clear = [
-            STATE_ARTIFACT_ID,
-            STATE_SUBLM_INSTRUCTION,
-            STATE_HAS_AGENT_CODE,
-            STATE_TEMP_PARSED_BLOB,
-        ] + ADDITIONAL_CLEAR_KEYS
+        # Clear invocation-scoped state keys (both temp:rlm:* and legacy rlm:*)
+        # During migration, we clear both to ensure no stale state leaks
+        # After migration, temp:rlm:* keys auto-discard so this is defensive
+        keys_to_clear = INVOCATION_KEYS_TO_CLEAR + LEGACY_KEYS_TO_CLEAR
 
         cleared_keys = []
         for key in keys_to_clear:

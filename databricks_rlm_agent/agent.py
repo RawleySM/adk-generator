@@ -58,8 +58,25 @@ from databricks_rlm_agent.tools import (
     get_repo_file,
 )
 
+# Import model factory for provider selection (Gemini vs LiteLLM)
+from databricks_rlm_agent.modeling import (
+    build_agent_model,
+    get_model_config,
+    get_fallback_router,
+)
+
 # Note: API keys (GOOGLE_API_KEY, etc.) are loaded from Databricks Secrets
 # via the secrets module at runtime startup in run.py. Do NOT hardcode keys here.
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+
+# Build the model for LlmAgents based on environment configuration
+# Supports: native ADK Gemini (default) or LiteLLM (OpenAI/Anthropic/local)
+# Set ADK_MODEL_PROVIDER=litellm to switch providers
+# See databricks_rlm_agent/modeling/model_factory.py for all config options
+_agent_model = build_agent_model()
 
 
 def get_logging_plugin() -> LoggingPlugin:
@@ -162,9 +179,10 @@ context_pruning_plugin = RlmContextPruningPlugin(
 
 # Databricks Analyst sub-agent: Primary agent for data discovery and code generation
 # This agent now uses delegate_code_results() for the RLM workflow
+# Model is selected via ADK_MODEL_PROVIDER env var (gemini or litellm)
 databricks_analyst = LlmAgent(
     name="databricks_analyst",
-    model="gemini-3-pro-preview",
+    model=_agent_model,
     instruction=ROOT_AGENT_INSTRUCTION,
     tools=[
         FunctionTool(save_artifact_to_volumes),
@@ -186,9 +204,10 @@ job_builder = JobBuilderAgent(
 
 # Results Processor Agent: Analyzes execution results with injected context
 # The context_injection_plugin injects stdout/stderr and sublm_instruction
+# Model is selected via ADK_MODEL_PROVIDER env var (gemini or litellm)
 results_processor_agent = LlmAgent(
     name="results_processor",
-    model="gemini-3-pro-preview",
+    model=_agent_model,
     instruction="""You are a specialist sub-agent for processing code execution results.
 
 Your role is to:
@@ -216,9 +235,11 @@ Structure your response with:
 
 # Orchestrator Loop: Iteratively executes sub-agents until completion or max_iterations
 # Agent sequence: databricks_analyst -> job_builder -> results_processor
+# max_iterations is configurable via ADK_MAX_ITERATIONS env var (default: 10)
+_max_iterations = int(os.environ.get("ADK_MAX_ITERATIONS", "10"))
 root_agent = LoopAgent(
     name="orchestrator_loop",
-    max_iterations=10,
+    max_iterations=_max_iterations,
     sub_agents=[
         databricks_analyst,       # 1. Generates code, calls delegate_code_results()
         job_builder,              # 2. Submits Job_B, waits, writes results
@@ -290,4 +311,8 @@ __all__ = [
     # Plugin factories
     "get_logging_plugin",
     "get_telemetry_plugin",
+    # Model configuration
+    "build_agent_model",
+    "get_model_config",
+    "get_fallback_router",
 ]

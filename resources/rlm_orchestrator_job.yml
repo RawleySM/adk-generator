@@ -43,8 +43,6 @@ resources:
           default: ${var.uc_schema}
         - name: ADK_ARTIFACTS_PATH
           default: ${var.artifacts_path}
-        - name: ADK_AGENT_CODE_PATH
-          default: ${var.agent_code_path}
         - name: ADK_EXECUTOR_JOB_ID
           default: ""  # Will be set by deploy script after both jobs exist
         - name: ADK_SECRET_SCOPE
@@ -59,6 +57,21 @@ resources:
           default: "job_user"
         - name: ADK_MAX_ITERATIONS
           default: "1"
+        - name: TEST_LEVEL
+          default: ""  # Test task level (1-10) - bypasses ingestor polling for E2E testing
+        # Model provider configuration
+        - name: ADK_MODEL_PROVIDER
+          default: "gemini"  # "gemini" (native ADK) or "litellm" (multi-provider)
+        - name: ADK_GEMINI_MODEL
+          default: "gemini-3-pro-preview"  # Model for native Gemini provider
+        - name: ADK_LITELLM_MODEL
+          default: "openai/gpt-4o"  # Primary model for LiteLLM provider
+        - name: ADK_LITELLM_FALLBACK_MODELS
+          default: ""  # Comma-separated fallback chain (e.g., "openai/gpt-4o-mini,anthropic/claude-3-haiku-20240307")
+        - name: ADK_FALLBACK_ON_BLOCKED
+          default: "true"  # Enable fallback on content-policy errors
+        - name: ADK_FALLBACK_GEMINI_TO_LITELLM
+          default: "true"  # Enable Gemini->LiteLLM fallback on blocking errors
 
       # Job settings
       max_concurrent_runs: 1

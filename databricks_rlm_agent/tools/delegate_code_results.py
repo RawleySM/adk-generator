@@ -8,11 +8,16 @@ The tool:
 2. Saves the code to the ADK ArtifactService
 3. Creates a metadata entry in the artifact registry Delta table
 4. Sets state keys for downstream agents:
-   - rlm:artifact_id - The artifact identifier
-   - rlm:sublm_instruction - The instruction for results_processor_agent
-   - rlm:has_agent_code - Whether there is code to execute
-   - rlm:iteration - Incremented iteration counter
+   - temp:rlm:artifact_id - The artifact identifier (invocation-scoped)
+   - temp:rlm:sublm_instruction - The instruction for results_processor_agent
+   - temp:rlm:has_agent_code - Whether there is code to execute
+   - rlm:iteration - Incremented iteration counter (session-scoped)
 5. Triggers escalation to let LoopAgent invoke the next sub-agent
+
+State key design:
+- Invocation glue keys use temp:rlm:* prefix (auto-discarded after invocation)
+- Only rlm:iteration is session-scoped (persists across invocations)
+- See plans/refactor_key_glue.md for the migration plan
 
 Usage:
     The agent calls delegate_code_results with a blob containing:
@@ -45,12 +50,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# State key constants
-STATE_ARTIFACT_ID = "rlm:artifact_id"
-STATE_SUBLM_INSTRUCTION = "rlm:sublm_instruction"
-STATE_HAS_AGENT_CODE = "rlm:has_agent_code"
-STATE_ITERATION = "rlm:iteration"
+# State key constants - invocation-scoped (temp:rlm:*)
+# These are auto-discarded after invocation by DeltaSessionService
+STATE_ARTIFACT_ID = "temp:rlm:artifact_id"
+STATE_SUBLM_INSTRUCTION = "temp:rlm:sublm_instruction"
+STATE_HAS_AGENT_CODE = "temp:rlm:has_agent_code"
+STATE_CODE_ARTIFACT_KEY = "temp:rlm:code_artifact_key"
+STATE_SESSION_ID = "temp:rlm:session_id"
+STATE_INVOCATION_ID = "temp:rlm:invocation_id"
 STATE_TEMP_PARSED_BLOB = "temp:parsed_blob"
+
+# Session-scoped state key (persists across invocations)
+STATE_ITERATION = "rlm:iteration"
 
 
 def delegate_code_results(code: str, tool_context: ToolContext) -> dict[str, Any]:
@@ -142,15 +153,18 @@ def delegate_code_results(code: str, tool_context: ToolContext) -> dict[str, Any
     }
 
     # Set state keys for downstream agents
+    # Invocation glue uses temp:rlm:* (auto-discarded after invocation)
     tool_context.state[STATE_ARTIFACT_ID] = artifact_id
     tool_context.state[STATE_SUBLM_INSTRUCTION] = parsed.sublm_instruction
     tool_context.state[STATE_HAS_AGENT_CODE] = bool(parsed.agent_code)
+
+    # Session-scoped iteration counter (persists across invocations)
     tool_context.state[STATE_ITERATION] = new_iteration
 
-    # Store additional context for the artifact registry
-    tool_context.state["rlm:code_artifact_key"] = code_artifact_key
-    tool_context.state["rlm:session_id"] = session_id
-    tool_context.state["rlm:invocation_id"] = invocation_id
+    # Store additional context for job_builder (invocation-scoped)
+    tool_context.state[STATE_CODE_ARTIFACT_KEY] = code_artifact_key
+    tool_context.state[STATE_SESSION_ID] = session_id
+    tool_context.state[STATE_INVOCATION_ID] = invocation_id
 
     # Create metadata entry in the artifact registry Delta table
     registry_created = False

@@ -6,6 +6,51 @@ This document summarizes the implementation of the 13-step RLM (Recursive Langua
 
 The core innovation is an **Artifact Registry** Delta table that decouples code generation from execution, enabling proper state propagation between agents.
 
+## Configuration
+
+### Job Parameters
+
+The orchestrator job accepts the following parameters:
+
+| Parameter | CLI Flag | Default | Description |
+|-----------|----------|---------|-------------|
+| `ADK_PROMPT` | `--prompt` | `""` | Inline prompt text to send to the agent |
+| `ADK_PROMPT_FILE` | `--prompt-file` | `/Volumes/silo_dev_rs/task/task_txt/task.txt` | Path to file containing the prompt (UC Volumes, DBFS, or local) |
+| `ADK_SESSION_ID` | `--session-id` | `"session_001"` | Session identifier for Delta persistence |
+| `ADK_USER_ID` | `--user-id` | `"job_user"` | User identifier for session ownership |
+| `ADK_MAX_ITERATIONS` | `--max-iterations` | `1` | Maximum RLM loop iterations |
+| `ADK_DELTA_CATALOG` | `--catalog` | `"silo_dev_rs"` | Unity Catalog for session/telemetry tables |
+| `ADK_DELTA_SCHEMA` | `--schema` | `"adk"` | Schema within the catalog |
+| `ADK_EXECUTOR_JOB_ID` | - | - | Job ID of Job_B (executor) for RLM loop |
+| `ADK_SECRET_SCOPE` | - | `"adk-secrets"` | Databricks secret scope for API keys |
+
+### Prompt Precedence
+
+The orchestrator resolves the prompt using the following precedence (highest to lowest):
+
+1. **Literal prompt** (`--prompt` / `ADK_PROMPT`) - wins if non-empty
+2. **Prompt file** (`--prompt-file` / `ADK_PROMPT_FILE`) - read only if literal prompt is empty
+3. **Default file path** - `/Volumes/silo_dev_rs/task/task_txt/task.txt`
+
+Example usage:
+
+```bash
+# Use default prompt file
+rlm-orchestrator
+
+# Specify inline prompt (wins over file)
+rlm-orchestrator --prompt "Count all vendors"
+
+# Specify custom prompt file
+rlm-orchestrator --prompt-file /Volumes/silo_dev_rs/task/task_txt/custom.txt
+
+# Via job parameters
+uv run scripts/run_and_wait.py --job-id 12345 \
+  --param ADK_PROMPT_FILE=/Volumes/silo_dev_rs/task/task_txt/task.txt
+```
+
+---
+
 ## Architecture
 
 ### Workflow Diagram
@@ -82,13 +127,22 @@ root_agent (LoopAgent)
 ## Key ADK Patterns Used
 
 ### 1. State Propagation
+
+State keys use the `temp:rlm:*` prefix for invocation-scoped glue (auto-discarded after invocation), while `rlm:iteration` remains session-scoped:
+
 ```python
-tool_context.state["rlm:artifact_id"] = artifact_id
-tool_context.state["rlm:sublm_instruction"] = parsed.sublm_instruction
-tool_context.state["rlm:has_agent_code"] = bool(agent_code)
+# Invocation-scoped glue (auto-discarded after invocation)
+tool_context.state["temp:rlm:artifact_id"] = artifact_id
+tool_context.state["temp:rlm:sublm_instruction"] = parsed.sublm_instruction
+tool_context.state["temp:rlm:has_agent_code"] = bool(agent_code)
+
+# Session-scoped counter (persists across invocations)
 tool_context.state["rlm:iteration"] += 1
 ```
-State keys persist via `EventActions.state_delta`.
+
+State keys propagate via `EventActions.state_delta`. The `temp:` prefix is stripped by `DeltaSessionService` before persistence, ensuring invocation glue doesn't leak to subsequent invocations.
+
+See `plans/refactor_key_glue.md` for the full migration plan.
 
 ### 2. Escalation Signal
 ```python
@@ -98,13 +152,16 @@ Stops the current agent and lets LoopAgent invoke the next sub-agent.
 
 ### 3. Context Injection
 
-Context injection reads from **state keys** (not directly from the registry):
+Context injection uses the dual-read pattern via `get_rlm_state()` helper (reads `temp:rlm:*` first, falls back to legacy `rlm:*` during migration):
+
 ```python
+from databricks_rlm_agent.utils.state_helpers import get_rlm_state
+
 async def before_agent_callback(self, *, callback_context):
-    # Read from state (set by job_builder)
-    artifact_id = callback_context.state.get("rlm:artifact_id")
-    stdout = callback_context.state.get("rlm:execution_stdout")
-    stderr = callback_context.state.get("rlm:execution_stderr")
+    # Dual-read: temp:rlm:* first, fallback to rlm:*
+    artifact_id = get_rlm_state(callback_context.state, "artifact_id")
+    stdout = get_rlm_state(callback_context.state, "execution_stdout")
+    stderr = get_rlm_state(callback_context.state, "execution_stderr")
 
     # Return types.Content to inject as user message
     return types.Content(
@@ -113,13 +170,18 @@ async def before_agent_callback(self, *, callback_context):
     )
 ```
 
-> **Note:** The plugin attempts to load stdout/stderr from ArtifactService keys if available, falling back to direct state values. This "state-driven" approach works because `job_builder` sets execution results in state before `results_processor_agent` runs.
+> **Note:** The plugin attempts to load stdout/stderr from `result.json` in UC Volumes first (via `temp:rlm:result_json_path`), falling back to state values. This ensures full output is available even when state stores only truncated previews.
 
 ### 4. State Pruning
+
+After migration, `temp:rlm:*` keys auto-discard so explicit pruning is mostly defensive. During migration, the plugin clears both `temp:rlm:*` and legacy `rlm:*` keys:
+
 ```python
 async def after_agent_callback(self, *, callback_context):
-    # Set to None to delete keys
-    callback_context.state["rlm:artifact_id"] = None
+    # Clear both temp:rlm:* and legacy rlm:* during migration
+    for key in INVOCATION_KEYS_TO_CLEAR + LEGACY_KEYS_TO_CLEAR:
+        if key in callback_context.state:
+            callback_context.state[key] = None  # None signals deletion
 ```
 
 ### 5. ArtifactService Integration
@@ -167,28 +229,42 @@ Plugins are configured in **two locations** with different scopes:
 
 ## State Keys
 
-### RLM Workflow State Keys
+### Invocation-Scoped State Keys (`temp:rlm:*`)
+
+These keys use the `temp:` prefix and are auto-discarded by `DeltaSessionService` after each invocation. This prevents stale glue from leaking across invocations if the workflow aborts early.
 
 | Key | Type | Description | Set By | Cleared By |
 |-----|------|-------------|--------|------------|
-| `rlm:artifact_id` | str | Current artifact identifier | delegate_code_results | pruning_plugin |
-| `rlm:sublm_instruction` | str | Instruction for results_processor_agent | delegate_code_results | pruning_plugin |
-| `rlm:has_agent_code` | bool | Whether artifact has code to execute | delegate_code_results | pruning_plugin |
-| `rlm:iteration` | int | Current loop iteration | delegate_code_results | **Preserved** |
-| `rlm:code_artifact_key` | str | Reference to code in ArtifactService | delegate_code_results | pruning_plugin |
-| `rlm:session_id` | str | Session identifier | delegate_code_results | pruning_plugin |
-| `rlm:invocation_id` | str | Invocation identifier | delegate_code_results | pruning_plugin |
-| `rlm:execution_stdout` | str | Captured stdout from execution | job_builder | pruning_plugin |
-| `rlm:execution_stderr` | str | Captured stderr from execution | job_builder | pruning_plugin |
-| `rlm:execution_success` | bool | Whether execution succeeded | job_builder | pruning_plugin |
-| `rlm:databricks_run_id` | str | Databricks job run ID | job_builder | pruning_plugin |
-| `rlm:run_url` | str | URL to Databricks run | job_builder | pruning_plugin |
+| `temp:rlm:artifact_id` | str | Current artifact identifier | delegate_code_results | auto-discarded |
+| `temp:rlm:sublm_instruction` | str | Instruction for results_processor_agent | delegate_code_results | auto-discarded |
+| `temp:rlm:has_agent_code` | bool | Whether artifact has code to execute | delegate_code_results | auto-discarded |
+| `temp:rlm:code_artifact_key` | str | Reference to code in ArtifactService | delegate_code_results | auto-discarded |
+| `temp:rlm:session_id` | str | Session identifier | delegate_code_results | auto-discarded |
+| `temp:rlm:invocation_id` | str | Invocation identifier | delegate_code_results | auto-discarded |
+| `temp:rlm:execution_stdout` | str | Captured stdout preview (truncated) | job_builder | auto-discarded |
+| `temp:rlm:execution_stderr` | str | Captured stderr preview (truncated) | job_builder | auto-discarded |
+| `temp:rlm:execution_success` | bool | Whether execution succeeded | job_builder | auto-discarded |
+| `temp:rlm:databricks_run_id` | str | Databricks job run ID | job_builder | auto-discarded |
+| `temp:rlm:run_url` | str | URL to Databricks run | job_builder | auto-discarded |
+| `temp:rlm:result_json_path` | str | Path to full result.json in UC Volumes | job_builder | auto-discarded |
+| `temp:rlm:stdout_truncated` | bool | Whether stdout was truncated | job_builder | auto-discarded |
+| `temp:rlm:stderr_truncated` | bool | Whether stderr was truncated | job_builder | auto-discarded |
+| `temp:rlm:exit_requested` | bool | Exit loop signal | exit_loop tool | auto-discarded |
+| `temp:rlm:fatal_error` | bool | Fatal error flag | job_builder | auto-discarded |
+| `temp:rlm:fatal_error_msg` | str | Fatal error message | job_builder | auto-discarded |
+| `temp:parsed_blob` | dict | Parsed delegation blob | delegate_code_results | auto-discarded |
 
-### Temporary State Keys
+### Session-Scoped State Keys
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `temp:parsed_blob` | dict | Parsed delegation blob (within invocation) |
+These keys persist across invocations intentionally:
+
+| Key | Type | Description | Set By | Cleared By |
+|-----|------|-------------|--------|------------|
+| `rlm:iteration` | int | Current loop iteration counter | delegate_code_results | **Preserved** |
+
+### Legacy Keys (Migration)
+
+During migration, readers use `get_rlm_state()` which tries `temp:rlm:*` first, falling back to `rlm:*`. Legacy `rlm:*` keys (e.g., `rlm:artifact_id`) are no longer written but may exist in older sessions. The pruning plugin clears both `temp:rlm:*` and `rlm:*` variants for safety.
 
 ## RLM Markers for Log Parsing
 

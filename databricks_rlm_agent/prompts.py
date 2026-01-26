@@ -94,7 +94,7 @@ from pathlib import Path
 base = Path("/Volumes/silo_dev_rs/repos/git_downloads")
 # TODO: set repo_name + file paths based on your get_repo_file outputs
 
-print(f"Scanning downloaded files under: {base}")
+print("Scanning downloaded files under:", base)
 result = {"files_reviewed": [], "notes": "Populate repo_name and file list from get_repo_file output."}
 ''')
 ```
@@ -120,11 +120,11 @@ silos = ["silo_dev_rs"]  # placeholder
 
 metrics = []
 for silo in silos:
-    tbl = f"{silo}.sm_erp.dim_vendor"
+    tbl = silo + ".sm_erp.dim_vendor"
     try:
         df = spark.table(tbl)
     except Exception as e:
-        print(f"SKIP {tbl}: {e}")
+        print("SKIP", tbl, ":", e)
         continue
 
     total = df.count()
@@ -172,8 +172,8 @@ CREATE OR REPLACE VIEW silo_dev_rs.adk.vendors_enriched AS
 SELECT
   v.*,
   e.some_col AS enr_some_col
-FROM {target_tbl} v
-LEFT JOIN {source_tbl} e
+FROM " + target_tbl + " v
+LEFT JOIN " + source_tbl + " e
   ON LOWER(v.name) = LOWER(e.name)
 \"\"\"
 
@@ -229,22 +229,25 @@ SpendMend-Data-Databricks contains:
 `silo_dev_rs.metadata.columnnames`
 
 ## Discovery Tools
-You have access to two powerful search tools that should be your starting point when queries lack specific context:
+You have access to powerful search tools that should be your starting point when queries lack specific context:
 
 1. `metadata_keyword_search(keyword, table_type="columnnames")`: 
    - Use this to find tables when you don't know the exact path. 
    - It searches `silo_dev_rs.metadata.columnnames` for tables matching your keyword or having columns matching your keyword.
+   - Searches are case-insensitive. Use | for OR patterns: `keyword="dim_|fact_"` finds dimension or fact tables.
    - Example: `metadata_keyword_search("vendor_tax_id")` will find tables containing tax ID information.
 
 2. `repo_filename_search(keyword, search_field="filename")`:
    - Use this to find code, configuration, or API specifications in the repositories.
-   - It searches `silo_dev_rs.repos.files`.
-   - You can find which code interacts with a specific table using `table_filter`.
-   - Example: `repo_filename_search("etl", table_filter="dim_vendor")` finds ETL scripts that reference the vendor dimension table.
+   - It searches `silo_dev_rs.repos.files` by filename, filepath, repo_name, or filetype.
+   - Searches are case-insensitive. Use `filetype_filter` to narrow by extension (e.g., "py", "sql", "yml|yaml").
+   - Example: `repo_filename_search("etl", filetype_filter="py")` finds Python files with 'etl' in the filename.
 
 3. `get_repo_file(filepaths, repo_name, branch="main")`:
    - Use this after `repo_filename_search` to download the specific file(s) you identified.
-   - It fetches the raw file from GitHub and saves it under `/Volumes/silo_dev_rs/repos/git_downloads/{repo_name}/`.
+   - Pass the `filepath` values from search results directly (dot-separated format is converted automatically).
+   - Files are saved preserving directory structure: `/Volumes/silo_dev_rs/repos/git_downloads/<repo_name>/<path>/<filename>`.
+   - Binary files (images, archives) are handled correctly. Text files are decoded as UTF-8.
    - Reminder: when the downloaded file is **text-heavy** (large `.py`, `.sql`, `.md`, configs, etc.), delegate the review/summarization to `delegate_code_results` to avoid bloating context and to extract only the relevant sections.
 """
 

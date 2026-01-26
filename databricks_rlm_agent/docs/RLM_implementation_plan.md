@@ -141,12 +141,14 @@ def parse_delegation_blob(blob: str) -> ParsedBlob:
 The tool must:
 1. Parse docstring header → `sublm_instruction` + `agent_code`
 2. Insert row to artifact registry
-3. Set state keys:
-   - `tool_context.state["rlm:artifact_id"] = artifact_id`
-   - `tool_context.state["rlm:sublm_instruction"] = sublm_instruction`
-   - `tool_context.state["rlm:has_agent_code"] = bool(agent_code)`
-   - `tool_context.state["rlm:iteration"] += 1`
+3. Set state keys (invocation-scoped `temp:rlm:*` for glue, session-scoped `rlm:iteration`):
+   - `tool_context.state["temp:rlm:artifact_id"] = artifact_id`
+   - `tool_context.state["temp:rlm:sublm_instruction"] = sublm_instruction`
+   - `tool_context.state["temp:rlm:has_agent_code"] = bool(agent_code)`
+   - `tool_context.state["rlm:iteration"] += 1`  # session-scoped counter
 4. Trigger escalation: `tool_context.actions.escalate = True`
+
+> **Note:** The `temp:rlm:*` prefix ensures glue keys auto-discard after invocation (see `plans/refactor_key_glue.md`).
 
 ---
 
@@ -175,11 +177,13 @@ Already exists - just add to App plugin list.
 ### Create `databricks_rlm_agent/plugins/rlm_context_injection_plugin.py`
 
 `before_agent_callback` for `results_processor` agent:
-1. Read `rlm:artifact_id` from `callback_context.state`
-2. Load artifact from registry
+1. Read `temp:rlm:artifact_id` from `callback_context.state` (via `get_rlm_state()` dual-read helper)
+2. Load full output from `result.json` in UC Volumes (via `temp:rlm:result_json_path`)
 3. Return `types.Content` with:
    - `sublm_instruction` as analysis request
    - `stdout`/`stderr` as execution output
+
+> **Note:** Uses dual-read pattern (`temp:rlm:*` first, fallback to `rlm:*`) for migration compatibility.
 
 ---
 
@@ -189,8 +193,10 @@ Already exists - just add to App plugin list.
 
 `after_agent_callback` for `results_processor` agent:
 1. Mark artifact as consumed in registry
-2. Clear state keys: `rlm:artifact_id`, `rlm:sublm_instruction`, `rlm:has_agent_code`
-3. Preserve `rlm:iteration` counter
+2. Clear both `temp:rlm:*` and legacy `rlm:*` keys (defensive during migration)
+3. Preserve `rlm:iteration` counter (session-scoped)
+
+> **Note:** After migration, `temp:rlm:*` keys auto-discard so explicit pruning is defensive. The plugin clears both variants to handle older sessions.
 
 ---
 
@@ -217,13 +223,13 @@ class JobBuilderAgent(BaseAgent):
     Deterministic agent that submits Job_B executor runs.
 
     No LLM - pure Python logic:
-    1. Read rlm:artifact_id from state
+    1. Read temp:rlm:artifact_id from state (via dual-read helper)
     2. Build job JSON with session parameters
     3. Submit via jobs.run_now()
     4. Wait for completion via get_run_output()
     5. Parse stdout between RLM markers
     6. Write results to artifact registry
-    7. State keys already set by delegate_code_results for results_processor_agent
+    7. Set temp:rlm:execution_* keys for results_processor_agent
     """
 
     def __init__(self, name: str = "job_builder"):
@@ -233,8 +239,9 @@ class JobBuilderAgent(BaseAgent):
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
         # Step 1: Check if we have an artifact to execute
-        artifact_id = ctx.session.state.get("rlm:artifact_id")
-        has_code = ctx.session.state.get("rlm:has_agent_code", False)
+        # Uses dual-read: temp:rlm:* first, fallback to legacy rlm:*
+        artifact_id = get_rlm_state(ctx.session.state, "artifact_id")
+        has_code = get_rlm_state(ctx.session.state, "has_agent_code", False)
 
         if not artifact_id or not has_code:
             # No code to execute - skip to next agent
@@ -248,7 +255,7 @@ class JobBuilderAgent(BaseAgent):
         job_json = self._build_job_json(
             artifact_id=artifact_id,
             session_id=ctx.session.id,
-            iteration=ctx.session.state.get("rlm:iteration", 1),
+            iteration=ctx.session.state.get("rlm:iteration", 1),  # session-scoped
         )
 
         # Step 4: Submit job via Jobs API
@@ -421,13 +428,14 @@ app = App(
 
 ## Key ADK Patterns Used
 
-1. **State Propagation**: `tool_context.state["rlm:*"]` keys persist via `EventActions.state_delta`
+1. **State Propagation**: Invocation glue uses `temp:rlm:*` keys (auto-discarded after invocation), while `rlm:iteration` is session-scoped. Keys propagate via `EventActions.state_delta`.
 2. **Escalation Signal**: `tool_context.actions.escalate = True` stops current agent
 3. **Context Injection**: `before_agent_callback` returns `types.Content` to inject user message
-4. **State Pruning**: `after_agent_callback` sets state keys to `None` to delete
-5. **Temp State**: `temp:parsed_blob` for within-invocation data sharing
+4. **State Pruning**: `after_agent_callback` sets state keys to `None` to delete (defensive for `temp:` keys)
+5. **Temp State**: `temp:rlm:*` for within-invocation glue, `temp:parsed_blob` for delegation blob caching
 6. **ArtifactService**: `context.save_artifact(filename, part)` / `context.load_artifact(filename)` for binary storage
 7. **Hybrid Storage**: Delta table for metadata + ADK ArtifactService for binary content
+8. **Dual-Read Pattern**: `get_rlm_state()` helper reads `temp:rlm:*` first, falls back to legacy `rlm:*` during migration
 
 ---
 
@@ -444,7 +452,7 @@ class ParallelJobBuilderAgent(BaseAgent):
     Enhanced job_builder that can launch multiple executor jobs.
 
     The upstream agent can specify parallelism:
-    - tool_context.state["rlm:parallel_artifacts"] = [artifact_id_1, artifact_id_2, ...]
+    - tool_context.state["temp:rlm:parallel_artifacts"] = [artifact_id_1, artifact_id_2, ...]
     - job_builder launches N jobs concurrently
     - Waits for all completions via asyncio.gather()
     - Aggregates results for downstream

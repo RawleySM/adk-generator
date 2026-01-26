@@ -12,6 +12,13 @@ DEFAULT_PROFILE = os.environ.get("DATABRICKS_PROFILE", "rstanhope")
 MAX_DISPLAY_ROWS = 5
 
 
+def _escape_sql_string(value: str) -> str:
+    """Escape single quotes in SQL string values to prevent SQL injection."""
+    if value is None:
+        return value
+    return value.replace("'", "''")
+
+
 def repo_filename_search(
     keyword: str,
     search_field: str = "filename",
@@ -97,27 +104,34 @@ def repo_filename_search(
     - keyword="config", filetype_filter="yml|yaml|json"
       → Finds config files (YAML or JSON) matching 'config'
 
-    Table reference searches:
-    -------------------------
-    - table_filter="silo_dev_rs.task.jira"
-      → Finds files that reference jira tables in their code
+    Table reference searches (PLACEHOLDER):
+    ----------------------------------------
+    NOTE: The dataTables column is currently unpopulated (empty arrays).
+    This filter will not return results until the GitHub indexer is updated
+    to extract UC table references from file contents.
 
-    - keyword="etl", table_filter="vendor"
-      → Finds ETL files that reference tables containing 'vendor'
+    - table_filter="silo_dev_rs.task.jira"
+      → Would find files that reference jira tables (once populated)
 
     Combined searches:
     ------------------
-    - keyword="loader", search_field="filename", filetype_filter="py", table_filter="jira"
-      → Python loader files that reference JIRA tables
+    - keyword="loader", search_field="filename", filetype_filter="py"
+      → Python loader files matching 'loader'
+
+    CASE SENSITIVITY:
+    =================
+    All LIKE searches are case-insensitive (uses LOWER()).
 
     Args:
         keyword (str): The search pattern. Use SQL wildcards (%) for LIKE searches.
-                       Use | to combine OR conditions for the keyword.
+                       Use | to combine OR conditions (only works with LIKE operator).
         search_field (str): Field to search - "filename", "filepath", "repo_name",
                             or "filetype" (default: "filename")
         operator (str): SQL operator - "LIKE", "NOT LIKE", "=", "!=" (default: "LIKE")
+                        Note: | OR-patterns only work with LIKE/NOT LIKE operators.
         table_filter (str, optional): Filter by files that reference UC Delta tables
                                       matching this pattern (searches dataTables column).
+                                      NOTE: Currently unpopulated - will return no results.
         filetype_filter (str, optional): Filter by file extension(s). Use | for OR
                                          (e.g., "py|sql" for Python or SQL files).
         tool_context (ToolContext, optional): The tool context for state management.
@@ -161,35 +175,53 @@ def repo_filename_search(
 
     # Main keyword search
     if keyword:
-        if "|" in keyword:
-            # Handle OR patterns
-            patterns = [p.strip() for p in keyword.split("|")]
-            or_clauses = []
+        # Escape single quotes to prevent SQL injection
+        escaped_keyword = _escape_sql_string(keyword)
+        
+        if "|" in escaped_keyword and operator in ("LIKE", "NOT LIKE"):
+            # Handle OR patterns (only valid for LIKE operators)
+            patterns = [p.strip() for p in escaped_keyword.split("|")]
+            pattern_clauses = []
             for p in patterns:
-                if operator == "LIKE" and "%" not in p:
+                if "%" not in p:
                     p = f"%{p}%"
-                or_clauses.append(f"{search_field} {operator} '{p}'")
-            where_clauses.append(f"({' OR '.join(or_clauses)})")
-        else:
-            search_pattern = keyword
-            if operator == "LIKE" and "%" not in keyword:
-                search_pattern = f"%{keyword}%"
+                # Case-insensitive LIKE
+                pattern_clauses.append(f"LOWER({search_field}) {operator} LOWER('{p}')")
+            # NOT LIKE requires AND (exclude all patterns); LIKE uses OR (match any pattern)
+            joiner = " AND " if operator == "NOT LIKE" else " OR "
+            where_clauses.append(f"({joiner.join(pattern_clauses)})")
+        elif "|" in escaped_keyword:
+            # OR patterns with = or != don't make semantic sense, warn and use first pattern
+            patterns = [p.strip() for p in escaped_keyword.split("|")]
+            search_pattern = patterns[0]  # Use first pattern only
             where_clauses.append(f"{search_field} {operator} '{search_pattern}'")
+        else:
+            search_pattern = escaped_keyword
+            if operator in ("LIKE", "NOT LIKE"):
+                if "%" not in escaped_keyword:
+                    search_pattern = f"%{escaped_keyword}%"
+                # Case-insensitive LIKE
+                where_clauses.append(f"LOWER({search_field}) {operator} LOWER('{search_pattern}')")
+            else:
+                # Exact match operators (=, !=)
+                where_clauses.append(f"{search_field} {operator} '{search_pattern}'")
 
     # Filetype filter
     if filetype_filter:
-        if "|" in filetype_filter:
-            types = [t.strip() for t in filetype_filter.split("|")]
+        escaped_filter = _escape_sql_string(filetype_filter)
+        if "|" in escaped_filter:
+            types = [_escape_sql_string(t.strip()) for t in filetype_filter.split("|")]
             type_clauses = [f"filetype = '{t}'" for t in types]
             where_clauses.append(f"({' OR '.join(type_clauses)})")
         else:
-            where_clauses.append(f"filetype = '{filetype_filter}'")
+            where_clauses.append(f"filetype = '{escaped_filter}'")
 
     # Table reference filter (searches dataTables array)
+    # NOTE: dataTables is currently unpopulated in the index
     if table_filter:
-        # Use array_contains or cast to string for search
-        table_pattern = table_filter if "%" in table_filter else f"%{table_filter}%"
-        where_clauses.append(f"CAST(dataTables AS STRING) LIKE '{table_pattern}'")
+        escaped_table = _escape_sql_string(table_filter)
+        table_pattern = escaped_table if "%" in escaped_table else f"%{escaped_table}%"
+        where_clauses.append(f"LOWER(CAST(dataTables AS STRING)) LIKE LOWER('{table_pattern}')")
 
     if not where_clauses:
         return {
@@ -284,11 +316,16 @@ def repo_filename_search(
             result["suggestion"] = (
                 f"Results exceed display limit. Consider:\n"
                 f"1. Add filetype_filter to narrow by extension (e.g., 'py', 'sql')\n"
-                f"2. Add table_filter to find files referencing specific tables\n"
-                f"3. Use more specific keywords\n"
-                f"4. Use delegate_code_results() to analyze the full result set by executing:\n"
+                f"2. Use more specific keywords\n"
+                f"3. Use delegate_code_results() to analyze the full result set by executing:\n"
                 f"   SELECT * FROM {target_table} WHERE {where_clause}"
             )
+
+        # Store search results in tool context for downstream tools (e.g., get_repo_file)
+        if tool_context:
+            tool_context.state["last_repo_search_count"] = total_count
+            tool_context.state["last_repo_search_rows"] = rows
+            tool_context.state["last_repo_search_query"] = select_sql
 
         return result
 

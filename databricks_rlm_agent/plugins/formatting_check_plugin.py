@@ -31,7 +31,7 @@ class FormattingCheckPlugin(BasePlugin):
     """Plugin that validates delegation blob formatting before tool execution.
 
     This plugin implements a before_tool_callback that checks the format of
-    delegation blobs passed to delegate_code_results and save_python_code tools.
+    delegation blobs passed to delegate_code_results tool.
 
     If the blob format is invalid (malformed docstring, empty code, etc.),
     the tool execution is blocked and a helpful error message is returned.
@@ -49,7 +49,7 @@ class FormattingCheckPlugin(BasePlugin):
     """
 
     # Tools that should be validated
-    VALIDATED_TOOLS = {"delegate_code_results", "save_python_code"}
+    VALIDATED_TOOLS = {"delegate_code_results"}
 
     # Parameter names that contain code/blobs to validate
     CODE_PARAMETERS = {"code", "blob", "content"}

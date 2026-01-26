@@ -18,8 +18,9 @@ Configuration:
 
     Expected secrets in the scope:
     - google-api-key -> GOOGLE_API_KEY
-    - openai-api-key -> OPENAI_API_KEY (optional)
-    - anthropic-api-key -> ANTHROPIC_API_KEY (optional)
+    - gemini-api-key -> GEMINI_API_KEY (optional, for LiteLLM Gemini provider)
+    - openai-api-key -> OPENAI_API_KEY (optional, for LiteLLM OpenAI provider)
+    - anthropic-api-key -> ANTHROPIC_API_KEY (optional, for LiteLLM Anthropic provider)
     - databricks-host -> DATABRICKS_HOST (optional, for Jobs API calls)
     - databricks-token -> DATABRICKS_TOKEN (optional, for Jobs API calls)
 
@@ -54,8 +55,9 @@ DEFAULT_SECRET_SCOPE = "adk-secrets"
 # Mapping of secret key names (in Databricks Secrets) to environment variable names
 SECRET_KEY_MAPPING = {
     "google-api-key": "GOOGLE_API_KEY",
-    "openai-api-key": "OPENAI_API_KEY",
-    "anthropic-api-key": "ANTHROPIC_API_KEY",
+    "gemini-api-key": "GEMINI_API_KEY",  # For LiteLLM Gemini provider (gemini/... models)
+    "openai-api-key": "OPENAI_API_KEY",  # For LiteLLM OpenAI provider
+    "anthropic-api-key": "ANTHROPIC_API_KEY",  # For LiteLLM Anthropic provider
     "databricks-host": "DATABRICKS_HOST",
     "databricks-token": "DATABRICKS_TOKEN",
 }
@@ -65,6 +67,7 @@ REQUIRED_SECRETS = {"google-api-key"}
 
 # Optional secrets (will log warning if not found)
 OPTIONAL_SECRETS = {
+    "gemini-api-key",  # For LiteLLM Gemini provider
     "openai-api-key",
     "anthropic-api-key",
     "databricks-host",

@@ -281,13 +281,26 @@ def orchestrator_main():
             sys.exit(1)
 
     # Load test task if --test-level is specified (bypasses ingestor polling)
+    # Also check for TEST_LEVEL job parameter if CLI arg not provided
+    if args.test_level is None:
+        test_level_str = _get_job_parameter("TEST_LEVEL", "")
+        if test_level_str:
+            try:
+                args.test_level = int(test_level_str)
+                logger.info(f"Using TEST_LEVEL from job parameter: {args.test_level}")
+            except ValueError:
+                logger.warning(f"Invalid TEST_LEVEL job parameter: {test_level_str}")
+
     if args.test_level is not None:
         try:
             from .test_tasks import get_task_prompt
             test_prompt = get_task_prompt(args.test_level)
             if test_prompt:
                 args.prompt = test_prompt
-                args.session_id = f"test_level_{args.test_level}_{args.session_id}"
+                # Use timestamp-based session ID to avoid stale session data
+                import time
+                ts = int(time.time())
+                args.session_id = f"test_level_{args.test_level}_{ts}"
                 logger.info(f"Loaded test task level {args.test_level} (bypassing ingestor)")
             else:
                 logger.error(f"No test task found for level {args.test_level}")
@@ -318,14 +331,15 @@ def orchestrator_main():
 
 
 async def _run_orchestrator(args, logger) -> int:
-    """Run the orchestrator logic with RLM loop.
+    """Run the orchestrator logic via ADK LoopAgent.
     
-    This implements the full orchestration pattern:
-    1. Agent generates code artifact
-    2. Submit Job_B (executor) to run the artifact
-    3. Wait for Job_B completion
-    4. Load result JSON with stdout/stderr
-    5. Feed results back to agent for next iteration
+    This delegates all orchestration to the ADK LoopAgent which handles:
+    - databricks_analyst: Generates code, calls delegate_code_results()
+    - job_builder: Submits Job_B, waits for completion, writes results to state
+    - results_processor_agent: Analyzes execution results with injected context
+    
+    The LoopAgent iterates these sub-agents until exit_loop is called or
+    max_iterations is reached (configurable via ADK_MAX_ITERATIONS env var).
     
     Args:
         args: Parsed command-line arguments.
@@ -334,12 +348,8 @@ async def _run_orchestrator(args, logger) -> int:
     Returns:
         Exit code (0 for success, non-zero for failure).
     """
-    from .run import create_runner, run_conversation, CATALOG, SCHEMA, APP_NAME
+    from .run import create_runner, run_conversation, ConversationResult, CATALOG, SCHEMA, APP_NAME
     from .telemetry import ensure_telemetry_table, append_telemetry_event
-    from .executor import find_result_json, load_result_json
-    from .jobs_api import submit_and_wait
-    from .prompts import format_execution_feedback
-    from .tools.save_python_code import AGENT_CODE_PATH
     
     spark = _get_spark_session()
     
@@ -347,8 +357,9 @@ async def _run_orchestrator(args, logger) -> int:
     catalog = args.catalog or CATALOG
     schema = args.schema or SCHEMA
     
-    # Get artifacts path for result files
-    artifacts_path = os.environ.get("ADK_ARTIFACTS_PATH", "/Volumes/silo_dev_rs/adk/artifacts")
+    # Set ADK_MAX_ITERATIONS env var for LoopAgent configuration
+    # This allows the agent.py LoopAgent to read the configured max_iterations
+    os.environ["ADK_MAX_ITERATIONS"] = str(args.max_iterations)
     
     # Ensure telemetry table exists
     logger.info("Ensuring telemetry table exists...")
@@ -393,7 +404,7 @@ async def _run_orchestrator(args, logger) -> int:
         else:
             raise
     
-    # Get executor job ID (needed for RLM loop)
+    # Check executor job ID for logging purposes
     executor_job_id = os.environ.get("ADK_EXECUTOR_JOB_ID")
     if not executor_job_id:
         secret_scope = os.environ.get("ADK_SECRET_SCOPE", "adk-secrets")
@@ -403,168 +414,109 @@ async def _run_orchestrator(args, logger) -> int:
             executor_job_id = dbutils.secrets.get(scope=secret_scope, key="rlm-executor-job-id")
             if executor_job_id:
                 logger.info(f"Loaded executor job ID from secret scope '{secret_scope}'")
+                # Set env var for JobBuilderAgent to use
+                os.environ["ADK_EXECUTOR_JOB_ID"] = executor_job_id
         except Exception as e:
             logger.debug(f"Could not read executor job ID from secrets: {e}")
-            executor_job_id = None
     
     if executor_job_id:
-        executor_job_id = int(executor_job_id)
         logger.info(f"Executor job ID configured: {executor_job_id}")
     else:
-        logger.info("No ADK_EXECUTOR_JOB_ID configured - will run agent without execution loop")
+        logger.warning(
+            "No ADK_EXECUTOR_JOB_ID configured - JobBuilderAgent will fail if code "
+            "execution is requested. Set ADK_EXECUTOR_JOB_ID or store 'rlm-executor-job-id' "
+            "in the secret scope."
+        )
     
-    # Store original prompt for feedback context
-    original_prompt = args.prompt
-    current_prompt = args.prompt
     final_status = "success"
     
-    # RLM Orchestration Loop
-    for iteration in range(1, args.max_iterations + 1):
-        logger.info("=" * 40)
-        logger.info(f"RLM Iteration {iteration}/{args.max_iterations}")
-        logger.info("=" * 40)
-        
-        if not current_prompt:
-            logger.info("No prompt provided - skipping iteration")
-            break
-        
-        # Step 1: Run agent conversation to generate artifact
-        logger.info(f"Running agent with prompt: {current_prompt[:100]}...")
-        response = await run_conversation(
-            runner=runner,
-            session_service=session_service,
-            user_id=args.user_id,
-            session_id=args.session_id,
-            prompt=current_prompt,
-        )
-        logger.info(f"Agent response: {response[:200]}...")
-        
-        # Record conversation completion
-        append_telemetry_event(
-            spark=spark,
-            catalog=catalog,
-            schema=schema,
-            event_type="conversation_complete",
-            component="orchestrator",
-            run_id=args.session_id,
-            iteration=iteration,
-            metadata={"prompt_len": len(current_prompt), "response_len": len(response)},
-        )
-        
-        # Step 2: Check if artifact was generated
-        if not os.path.exists(AGENT_CODE_PATH):
-            logger.info(f"No artifact at {AGENT_CODE_PATH} - agent may not have generated code")
-            # No artifact means no execution needed; break loop
-            break
-        
-        # Step 3: Submit Job_B (executor) if configured
-        if not executor_job_id:
-            logger.info("No executor job configured - cannot execute artifact")
-            break
-        
-        logger.info(f"Submitting executor job for artifact: {AGENT_CODE_PATH}")
-        append_telemetry_event(
-            spark=spark,
-            catalog=catalog,
-            schema=schema,
-            event_type="executor_submit",
-            component="orchestrator",
-            run_id=args.session_id,
-            iteration=iteration,
-            metadata={"artifact_path": AGENT_CODE_PATH, "executor_job_id": executor_job_id},
-        )
-        
+    # Run the agent conversation - ADK LoopAgent handles all iteration
+    # The LoopAgent will iterate: databricks_analyst -> job_builder -> results_processor
+    # until exit_loop is called or max_iterations is reached
+    if not args.prompt:
+        logger.info("No prompt provided - skipping agent conversation")
+    else:
+        logger.info(f"Running agent with prompt: {args.prompt[:100]}...")
         try:
-            # Submit and wait for executor to complete
-            exec_result = submit_and_wait(
-                executor_job_id=executor_job_id,
-                artifact_path=AGENT_CODE_PATH,
-                run_id=args.session_id,
-                iteration=iteration,
-                timeout_minutes=int(os.environ.get("ADK_EXECUTOR_TIMEOUT_MINUTES", "60")),
-                catalog=catalog,
-                schema=schema,
+            result = await run_conversation(
+                runner=runner,
+                session_service=session_service,
+                user_id=args.user_id,
+                session_id=args.session_id,
+                prompt=args.prompt,
             )
-            
-            logger.info(f"Executor completed: success={exec_result.get('success')}")
-            logger.info(f"Run URL: {exec_result.get('run_url')}")
-            
-            # Record executor completion
-            append_telemetry_event(
-                spark=spark,
-                catalog=catalog,
-                schema=schema,
-                event_type="executor_complete",
-                component="orchestrator",
-                run_id=args.session_id,
-                iteration=iteration,
-                metadata={
-                    "databricks_run_id": exec_result.get("databricks_run_id"),
-                    "success": exec_result.get("success"),
-                    "life_cycle_state": exec_result.get("life_cycle_state"),
-                    "result_state": exec_result.get("result_state"),
-                },
-            )
-            
+            response = result.response_text
+            logger.info(f"Agent response: {response[:500] if response else '(empty)'}...")
+            logger.info(f"Conversation status: {result.status}, delegations: {result.delegation_count}")
+
+            # Use ConversationResult.status directly - no need to re-fetch session
+            # The temp:rlm:* keys are not persisted by DeltaSessionService, so the
+            # old pattern of re-fetching session and checking temp:* was broken
+            if result.status == "fatal_error":
+                fatal_msg = result.fatal_error_msg or "Unknown"
+                logger.error(f"Workflow terminated with fatal error: {fatal_msg}")
+                final_status = "fatal_error"
+                append_telemetry_event(
+                    spark=spark,
+                    catalog=catalog,
+                    schema=schema,
+                    event_type="fatal_error",
+                    component="orchestrator",
+                    run_id=args.session_id,
+                    iteration=1,
+                    metadata={
+                        "fatal_error_msg": fatal_msg,
+                        "response_len": len(response) if response else 0,
+                        "delegation_count": result.delegation_count,
+                    },
+                )
+            elif result.status == "exit_loop":
+                # Normal completion via exit_loop tool
+                logger.info(f"Workflow completed via exit_loop after {result.delegation_count} delegation(s)")
+                append_telemetry_event(
+                    spark=spark,
+                    catalog=catalog,
+                    schema=schema,
+                    event_type="conversation_complete",
+                    component="orchestrator",
+                    run_id=args.session_id,
+                    iteration=1,
+                    metadata={
+                        "prompt_len": len(args.prompt),
+                        "response_len": len(response) if response else 0,
+                        "exit_reason": "exit_loop",
+                        "delegation_count": result.delegation_count,
+                    },
+                )
+            else:
+                # Success without explicit exit_loop (max_iterations reached or simple response)
+                append_telemetry_event(
+                    spark=spark,
+                    catalog=catalog,
+                    schema=schema,
+                    event_type="conversation_complete",
+                    component="orchestrator",
+                    run_id=args.session_id,
+                    iteration=1,
+                    metadata={
+                        "prompt_len": len(args.prompt),
+                        "response_len": len(response) if response else 0,
+                        "delegation_count": result.delegation_count,
+                    },
+                )
         except Exception as e:
-            logger.error(f"Executor submission failed: {e}")
+            logger.error(f"Agent conversation failed: {e}")
+            final_status = "agent_error"
             append_telemetry_event(
                 spark=spark,
                 catalog=catalog,
                 schema=schema,
-                event_type="executor_error",
+                event_type="agent_error",
                 component="orchestrator",
                 run_id=args.session_id,
-                iteration=iteration,
+                iteration=1,
                 metadata={"error": str(e)},
             )
-            final_status = "executor_error"
-            break
-        
-        # Step 4: Load result JSON from executor
-        result_path = find_result_json(
-            artifacts_path=artifacts_path,
-            run_id=args.session_id,
-            iteration=iteration,
-        )
-        
-        if result_path:
-            result_data = load_result_json(result_path)
-            logger.info(f"Loaded result from: {result_path}")
-        else:
-            # Fallback: use data from the Jobs API response
-            logger.warning(f"Result JSON not found at expected path, using Jobs API output")
-            result_data = {
-                "status": "success" if exec_result.get("success") else "failed",
-                "output": exec_result.get("logs"),
-                "error": exec_result.get("error"),
-                "error_trace": exec_result.get("error_trace"),
-                "duration_seconds": 0,
-            }
-        
-        # Step 5: Check if we should continue iterating
-        if iteration >= args.max_iterations:
-            logger.info(f"Reached max iterations ({args.max_iterations})")
-            break
-        
-        # Execution succeeded and no more work needed
-        if result_data and result_data.get("status") == "success" and not result_data.get("error"):
-            logger.info("Execution succeeded - task complete")
-            break
-        
-        # Step 6: Format feedback prompt for next iteration
-        logger.info("Preparing feedback prompt for next iteration...")
-        current_prompt = format_execution_feedback(
-            status=result_data.get("status", "unknown") if result_data else "unknown",
-            duration_seconds=result_data.get("duration_seconds", 0) if result_data else 0,
-            original_prompt=original_prompt,
-            stdout=result_data.get("stdout") if result_data else exec_result.get("logs"),
-            stderr=result_data.get("stderr") if result_data else None,
-            error=result_data.get("error") if result_data else exec_result.get("error"),
-            error_trace=result_data.get("error_trace") if result_data else exec_result.get("error_trace"),
-        )
-        
-        logger.info("Continuing to next iteration with execution feedback...")
     
     # Record orchestrator completion
     append_telemetry_event(
@@ -574,7 +526,7 @@ async def _run_orchestrator(args, logger) -> int:
         event_type="orchestrator_complete",
         component="orchestrator",
         run_id=args.session_id,
-        iteration=args.max_iterations,
+        iteration=1,
         metadata={"status": final_status},
     )
     

@@ -78,6 +78,33 @@ def _merge_state(
     return merged
 
 
+def _apply_state_delta(
+    current_state: dict[str, Any],
+    state_delta: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply a state delta with deletion-on-None semantics.
+
+    When a value in state_delta is None, the key is deleted from current_state.
+    Otherwise, the value is set/updated.
+
+    Args:
+        current_state: The current state dictionary.
+        state_delta: The delta to apply. None values indicate deletion.
+
+    Returns:
+        New state dictionary with delta applied.
+    """
+    new_state = copy.deepcopy(current_state)
+    for key, value in state_delta.items():
+        if value is None:
+            # Delete the key if it exists
+            new_state.pop(key, None)
+        else:
+            # Set/update the value
+            new_state[key] = value
+    return new_state
+
+
 class DeltaSessionService(BaseSessionService):
     """A session service that persists sessions to Databricks Unity Catalog Delta tables.
 
@@ -250,14 +277,23 @@ class DeltaSessionService(BaseSessionService):
             return json.dumps(obj.model_dump(mode="json", by_alias=True))
         return json.dumps(obj)
 
-    def _from_json(self, json_str: Optional[str]) -> dict[str, Any]:
-        """Deserialize a JSON string to a dictionary."""
+    def _from_json(self, json_str: Optional[str], recover_on_error: bool = True) -> dict[str, Any]:
+        """Deserialize a JSON string to a dictionary.
+
+        Args:
+            json_str: JSON string to deserialize
+            recover_on_error: If True, return empty dict on JSON errors instead of raising.
+                This allows graceful recovery from corrupted state.
+        """
         if not json_str:
             return {}
         try:
             return json.loads(json_str, strict=False)
         except json.JSONDecodeError as e:
             logger.error(f"Failed to decode JSON: {e}. String: {json_str[:100]}...")
+            if recover_on_error:
+                logger.warning("Recovering from corrupted JSON by returning empty state")
+                return {}
             raise
 
     async def _get_app_state(self, app_name: str) -> dict[str, Any]:
@@ -290,16 +326,20 @@ class DeltaSessionService(BaseSessionService):
         app_name: str,
         state_delta: dict[str, Any],
     ) -> None:
-        """Upsert app state with the given delta."""
+        """Upsert app state with the given delta.
+
+        Uses deletion-on-None semantics: if a value in state_delta is None,
+        the key is removed from the persisted state.
+        """
         if not state_delta:
             return
 
         escaped_app = self._escape_sql_string(app_name)
         now = datetime.now(timezone.utc).isoformat()
 
-        # Get current state
+        # Get current state and apply delta with deletion semantics
         current_state = await self._get_app_state(app_name)
-        new_state = {**current_state, **state_delta}
+        new_state = _apply_state_delta(current_state, state_delta)
         state_json = self._escape_sql_string(json.dumps(new_state))
 
         self._spark.sql(f"""
@@ -320,7 +360,11 @@ class DeltaSessionService(BaseSessionService):
         user_id: str,
         state_delta: dict[str, Any],
     ) -> None:
-        """Upsert user state with the given delta."""
+        """Upsert user state with the given delta.
+
+        Uses deletion-on-None semantics: if a value in state_delta is None,
+        the key is removed from the persisted state.
+        """
         if not state_delta:
             return
 
@@ -328,9 +372,9 @@ class DeltaSessionService(BaseSessionService):
         escaped_user = self._escape_sql_string(user_id)
         now = datetime.now(timezone.utc).isoformat()
 
-        # Get current state
+        # Get current state and apply delta with deletion semantics
         current_state = await self._get_user_state(app_name, user_id)
-        new_state = {**current_state, **state_delta}
+        new_state = _apply_state_delta(current_state, state_delta)
         state_json = self._escape_sql_string(json.dumps(new_state))
 
         self._spark.sql(f"""
@@ -771,9 +815,12 @@ class DeltaSessionService(BaseSessionService):
             pending_user_delta = state_deltas["user"]
             session_state_delta = state_deltas["session"]
 
-            # Update session state (local only, will be persisted in UPDATE)
+            # Update session state with deletion-on-None semantics
+            # (local only, will be persisted in UPDATE)
             if session_state_delta:
-                current_session_state = {**current_session_state, **session_state_delta}
+                current_session_state = _apply_state_delta(
+                    current_session_state, session_state_delta
+                )
 
             state_delta_json = self._escape_sql_string(
                 json.dumps(event.actions.state_delta)
@@ -955,13 +1002,13 @@ class DeltaSessionService(BaseSessionService):
             ORDER BY sequence_num ASC, created_time ASC, event_id ASC
         """).collect()
 
-        # Rebuild session state from events
+        # Rebuild session state from events with deletion-on-None semantics
         session_state: dict[str, Any] = {}
         for row in events_result:
             if row["has_state_delta"] and row["state_delta_json"]:
                 delta = self._from_json(row["state_delta_json"])
                 state_deltas = _extract_state_delta(delta)
-                session_state = {**session_state, **state_deltas["session"]}
+                session_state = _apply_state_delta(session_state, state_deltas["session"])
 
         # Update session row
         state_json = self._escape_sql_string(json.dumps(session_state))
@@ -1025,12 +1072,13 @@ class DeltaSessionService(BaseSessionService):
             ORDER BY sequence_num ASC, created_time ASC, event_id ASC
         """).collect()
 
+        # Rebuild state with deletion-on-None semantics
         session_state: dict[str, Any] = {}
         for row in events_result:
             if row["has_state_delta"] and row["state_delta_json"]:
                 delta = self._from_json(row["state_delta_json"])
                 state_deltas = _extract_state_delta(delta)
-                session_state = {**session_state, **state_deltas["session"]}
+                session_state = _apply_state_delta(session_state, state_deltas["session"])
 
         # Update session row
         state_json = self._escape_sql_string(json.dumps(session_state))

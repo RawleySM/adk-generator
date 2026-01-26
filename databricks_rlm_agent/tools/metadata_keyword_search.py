@@ -13,6 +13,13 @@ DEFAULT_PROFILE = os.environ.get("DATABRICKS_PROFILE", "rstanhope")
 MAX_DISPLAY_ROWS = 5
 
 
+def _escape_sql_string(value: str) -> str:
+    """Escape single quotes in SQL string values to prevent SQL injection."""
+    if value is None:
+        return value
+    return value.replace("'", "''")
+
+
 def metadata_keyword_search(
     keyword: str,
     table_type: str = "columnnames",
@@ -48,12 +55,15 @@ def metadata_keyword_search(
 
     OPERATORS:
     ==========
-    - LIKE: SQL LIKE pattern matching (use % for wildcards)
-    - NOT LIKE: Exclude patterns
-    - =: Exact match
-    - !=: Not equal
-    - AND: Combine with previous search (requires session state)
-    - OR: Alternative match (use | in keyword)
+    - LIKE: SQL LIKE pattern matching (use % for wildcards). Case-insensitive.
+    - NOT LIKE: Exclude patterns. Case-insensitive.
+    - =: Exact match (case-sensitive)
+    - !=: Not equal (case-sensitive)
+
+    OR PATTERNS:
+    ============
+    Use | in keyword to combine OR conditions. Only works with LIKE/NOT LIKE operators.
+    Example: keyword="dim_%|fact_%" finds tables starting with 'dim_' OR 'fact_'.
 
     EXAMPLES:
     =========
@@ -85,11 +95,12 @@ def metadata_keyword_search(
 
     Args:
         keyword (str): The search pattern. Use SQL wildcards (%) for LIKE searches.
-                       Use | to combine OR conditions.
+                       Use | to combine OR conditions (only works with LIKE/NOT LIKE).
         table_type (str): Which table to search:
                           - "columnnames" (default): Search table/column metadata
                           - "provenance": Search operation history
         operator (str): SQL operator - "LIKE", "NOT LIKE", "=", "!=" (default: "LIKE")
+                        Note: | OR-patterns only work with LIKE/NOT LIKE operators.
         tool_context (ToolContext, optional): The tool context for state management.
 
     Returns:
@@ -130,17 +141,38 @@ def metadata_keyword_search(
             "message": f"Invalid table_type '{table_type}'. Use 'columnnames' or 'provenance'."
         }
 
-    # Handle OR patterns (| separator)
-    if "|" in keyword:
-        patterns = [p.strip() for p in keyword.split("|")]
-        where_clauses = [f"{search_column} {operator} '%{p}%'" for p in patterns]
-        where_clause = " OR ".join(where_clauses)
-    else:
-        # Auto-add wildcards for LIKE if not present
-        search_pattern = keyword
-        if operator == "LIKE" and "%" not in keyword:
-            search_pattern = f"%{keyword}%"
+    # Escape single quotes to prevent SQL injection
+    escaped_keyword = _escape_sql_string(keyword)
+
+    # Handle OR patterns (| separator) - only valid for LIKE operators
+    if "|" in escaped_keyword and operator in ("LIKE", "NOT LIKE"):
+        patterns = [p.strip() for p in escaped_keyword.split("|")]
+        pattern_clauses = []
+        for p in patterns:
+            # p is already escaped (from escaped_keyword), don't double-escape
+            if "%" not in p:
+                p = f"%{p}%"
+            # Case-insensitive LIKE
+            pattern_clauses.append(f"LOWER({search_column}) {operator} LOWER('{p}')")
+        # NOT LIKE requires AND (exclude all patterns); LIKE uses OR (match any pattern)
+        joiner = " AND " if operator == "NOT LIKE" else " OR "
+        where_clause = joiner.join(pattern_clauses)
+    elif "|" in escaped_keyword:
+        # OR patterns with = or != don't make semantic sense, use first pattern
+        patterns = [p.strip() for p in escaped_keyword.split("|")]
+        search_pattern = patterns[0]
         where_clause = f"{search_column} {operator} '{search_pattern}'"
+    else:
+        # Single pattern search
+        search_pattern = escaped_keyword
+        if operator in ("LIKE", "NOT LIKE"):
+            if "%" not in escaped_keyword:
+                search_pattern = f"%{escaped_keyword}%"
+            # Case-insensitive LIKE
+            where_clause = f"LOWER({search_column}) {operator} LOWER('{search_pattern}')"
+        else:
+            # Exact match operators (=, !=)
+            where_clause = f"{search_column} {operator} '{search_pattern}'"
 
     # Build count and select queries
     count_sql = f"SELECT COUNT(*) as cnt FROM {target_table} WHERE {where_clause}"
@@ -229,6 +261,13 @@ def metadata_keyword_search(
                 f"2. Use delegate_code_results() to analyze the full result set by executing:\n"
                 f"   SELECT * FROM {target_table} WHERE {where_clause}"
             )
+
+        # Store search results in tool context for downstream tools
+        if tool_context:
+            tool_context.state["last_metadata_search_count"] = total_count
+            tool_context.state["last_metadata_search_rows"] = rows
+            tool_context.state["last_metadata_search_query"] = select_sql
+            tool_context.state["last_metadata_search_table"] = target_table
 
         return result
 

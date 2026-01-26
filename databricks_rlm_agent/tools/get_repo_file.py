@@ -48,6 +48,25 @@ KNOWN_EXTENSIONS = [
     '.sln', '.csproj', '.cs', '.vb', '.config'
 ]
 
+# Binary file extensions that should NOT be decoded as text
+BINARY_EXTENSIONS = {
+    '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.bmp', '.webp',
+    '.whl', '.tar.gz', '.tar.bz2', '.tar.xz', '.zip', '.jar', '.gz', '.bz2',
+    '.parquet', '.delta', '.avro', '.orc',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.exe', '.dll', '.so', '.dylib', '.bin',
+    '.pyc', '.pyo', '.class',
+}
+
+
+def _is_binary_file(filepath: str) -> bool:
+    """Check if a file should be treated as binary based on its extension."""
+    filepath_lower = filepath.lower()
+    for ext in BINARY_EXTENSIONS:
+        if filepath_lower.endswith(ext):
+            return True
+    return False
+
 
 def _convert_uc_filepath_to_github_path(filepath: str) -> str:
     """
@@ -156,12 +175,19 @@ def _download_single_file(
     """
     Downloads a single file from GitHub and saves to Unity Catalog Volume.
     
+    Preserves directory structure: files are saved to
+    {target_volume}/{repo_name}/{github_path} to avoid filename collisions.
+    
+    Binary files (images, archives, etc.) are written in binary mode to
+    prevent corruption.
+    
     Returns:
         Dict with download results including success status.
     """
     github_path = _convert_uc_filepath_to_github_path(filepath)
     filename = _extract_filename_from_path(filepath)
     url = _build_raw_github_url(repo_name, filepath, branch)
+    is_binary = _is_binary_file(filepath)
     
     result = {
         "repo_name": repo_name,
@@ -169,7 +195,8 @@ def _download_single_file(
         "github_path": github_path,
         "filename": filename,
         "url": url,
-        "branch": branch
+        "branch": branch,
+        "is_binary": is_binary
     }
     
     headers = {"Authorization": f"token {token}"}
@@ -191,27 +218,34 @@ def _download_single_file(
                         bytes_downloaded += len(chunk)
                 
                 download_time = time.perf_counter() - start_time
-                
-                # Decode content
                 raw_bytes = b''.join(chunks)
-                try:
-                    content = raw_bytes.decode('utf-8')
-                except UnicodeDecodeError:
-                    content = raw_bytes.decode('latin-1')
                 
-                # Write to volume
+                # Build output path preserving directory structure
+                # e.g., /Volumes/.../repo_name/src/etl/loader.py instead of just loader.py
                 if not target_volume.endswith('/'):
                     target_volume = target_volume + '/'
                 
-                # Create subdirectory based on repo name
-                repo_dir = os.path.join(target_volume, repo_name)
-                os.makedirs(repo_dir, exist_ok=True)
-                
-                output_path = os.path.join(repo_dir, filename)
+                # Use github_path (with slashes) to preserve directory hierarchy
+                output_path = os.path.join(target_volume, repo_name, github_path)
+                output_dir = os.path.dirname(output_path)
+                os.makedirs(output_dir, exist_ok=True)
                 
                 write_start = time.perf_counter()
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
+                
+                if is_binary:
+                    # Write binary files directly without decoding
+                    with open(output_path, 'wb') as f:
+                        f.write(raw_bytes)
+                else:
+                    # Decode and write text files
+                    try:
+                        content = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = raw_bytes.decode('latin-1')
+                    
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                
                 write_time = time.perf_counter() - write_start
                 
                 result["success"] = True
@@ -271,9 +305,9 @@ def get_repo_file(
     as returned by repo_filename_search from the silo_dev_rs.repos.files table.
     
     Examples of valid filepath formats:
-    - 'PyFunctions.Shared.ai_models.perplexity.py' -> downloads 'perplexity.py'
-    - 'src.etl.loader.py' -> downloads 'loader.py'
-    - 'docs.README.md' -> downloads 'README.md'
+    - 'PyFunctions.Shared.ai_models.perplexity.py' -> saves to PyFunctions/Shared/ai_models/perplexity.py
+    - 'src.etl.loader.py' -> saves to src/etl/loader.py
+    - 'docs.README.md' -> saves to docs/README.md
     
     RATE LIMITING:
     ==============
@@ -283,7 +317,16 @@ def get_repo_file(
     
     OUTPUT LOCATION:
     ================
-    Files are saved to: /Volumes/silo_dev_rs/repos/git_downloads/{repo_name}/
+    Files are saved to: /Volumes/silo_dev_rs/repos/git_downloads/{repo_name}/{path_structure}/
+    
+    Directory structure is preserved to avoid filename collisions. For example,
+    two files named 'config.yml' in different directories will be saved to their
+    respective subdirectories.
+    
+    BINARY FILES:
+    =============
+    Binary files (images, archives, etc.) are detected by extension and written
+    in binary mode to prevent corruption. Text files are decoded as UTF-8.
     
     WORKFLOW:
     =========

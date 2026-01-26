@@ -4,10 +4,14 @@ This plugin provides a before_agent_callback for the results_processor agent
 that injects execution context from the artifact registry.
 
 When results_processor_agent is about to run, this plugin:
-1. Reads rlm:artifact_id from state
+1. Reads temp:rlm:artifact_id from state (with fallback to legacy rlm:*)
 2. Loads the artifact metadata from the registry
-3. Loads stdout/stderr from the ArtifactService
+3. Loads stdout/stderr from result.json or state
 4. Returns a types.Content message injecting this context
+
+State key design:
+- Uses dual-read pattern: temp:rlm:* first, fallback to rlm:* for migration
+- See plans/refactor_key_glue.md for the migration plan
 
 This enables results_processor_agent to analyze execution output based on
 the sublm_instruction without needing the orchestrator to manually format
@@ -16,8 +20,10 @@ the context.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Optional, TYPE_CHECKING
+import os
+from typing import Any, Optional, Tuple, TYPE_CHECKING
 
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.plugins.base_plugin import BasePlugin
@@ -28,11 +34,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Import state helpers for dual-read pattern
+from databricks_rlm_agent.utils.state_helpers import get_rlm_state
 
-# State key constants (must match delegate_code_results.py)
-STATE_ARTIFACT_ID = "rlm:artifact_id"
-STATE_SUBLM_INSTRUCTION = "rlm:sublm_instruction"
-STATE_HAS_AGENT_CODE = "rlm:has_agent_code"
+# State key constants - invocation-scoped (temp:rlm:*)
+# Use get_rlm_state() for dual-read with fallback to legacy keys
+STATE_ARTIFACT_ID = "temp:rlm:artifact_id"
+STATE_SUBLM_INSTRUCTION = "temp:rlm:sublm_instruction"
+STATE_HAS_AGENT_CODE = "temp:rlm:has_agent_code"
+STATE_RESULT_JSON_PATH = "temp:rlm:result_json_path"
+STATE_EXECUTION_STDOUT = "temp:rlm:execution_stdout"
+STATE_EXECUTION_STDERR = "temp:rlm:execution_stderr"
+STATE_STDOUT_TRUNCATED = "temp:rlm:stdout_truncated"
+
+# Session-scoped keys
+STATE_ITERATION = "rlm:iteration"
 
 
 class RlmContextInjectionPlugin(BasePlugin):
@@ -75,6 +91,48 @@ class RlmContextInjectionPlugin(BasePlugin):
         logger.info(
             f"RlmContextInjectionPlugin initialized for agent '{target_agent_name}'"
         )
+
+    def _load_from_result_json(
+        self,
+        result_json_path: str,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Load stdout/stderr from result.json in UC Volumes.
+
+        This is the primary source of execution output, written by the executor
+        to the same directory as the artifact.
+
+        Args:
+            result_json_path: Full path to the result.json file.
+
+        Returns:
+            Tuple of (stdout, stderr), both may be None if loading failed.
+        """
+        try:
+            if not result_json_path or not os.path.exists(result_json_path):
+                logger.debug(f"[{self.name}] result.json not found: {result_json_path}")
+                return None, None
+
+            with open(result_json_path, 'r') as f:
+                result_data = json.load(f)
+
+            stdout = result_data.get("stdout")
+            stderr = result_data.get("stderr")
+
+            if self._enable_logging:
+                logger.info(
+                    f"[{self.name}] Loaded from result.json: "
+                    f"stdout={len(stdout) if stdout else 0} chars, "
+                    f"stderr={len(stderr) if stderr else 0} chars"
+                )
+
+            return stdout, stderr
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"[{self.name}] Invalid JSON in result file: {e}")
+            return None, None
+        except Exception as e:
+            logger.warning(f"[{self.name}] Failed to load result.json: {e}")
+            return None, None
 
     def _format_injection_content(
         self,
@@ -158,7 +216,8 @@ class RlmContextInjectionPlugin(BasePlugin):
             return None
 
         # Check if we have an artifact to process
-        artifact_id = callback_context.state.get(STATE_ARTIFACT_ID)
+        # Use dual-read: try temp:rlm:* first, fall back to legacy rlm:*
+        artifact_id = get_rlm_state(callback_context.state, "artifact_id")
         if not artifact_id:
             self.skip_count += 1
             if self._enable_logging:
@@ -168,11 +227,11 @@ class RlmContextInjectionPlugin(BasePlugin):
                 )
             return None
 
-        # Get the sublm_instruction from state
-        sublm_instruction = callback_context.state.get(STATE_SUBLM_INSTRUCTION)
+        # Get the sublm_instruction from state (dual-read)
+        sublm_instruction = get_rlm_state(callback_context.state, "sublm_instruction")
 
-        # Get iteration
-        iteration = callback_context.state.get("rlm:iteration", 0)
+        # Get iteration (session-scoped, no dual-read needed)
+        iteration = callback_context.state.get(STATE_ITERATION, 0)
 
         if self._enable_logging:
             print(
@@ -184,35 +243,59 @@ class RlmContextInjectionPlugin(BasePlugin):
                 f"artifact_id={artifact_id}, iteration={iteration}"
             )
 
-        # Try to load stdout/stderr from ArtifactService
+        # Priority 1: Load stdout/stderr from result.json in UC Volumes
+        # This is the canonical source - executor writes full output here
         stdout = None
         stderr = None
+        source = "none"
 
-        stdout_key = callback_context.state.get("rlm:stdout_artifact_key")
-        stderr_key = callback_context.state.get("rlm:stderr_artifact_key")
+        # Use dual-read for result_json_path
+        result_json_path = get_rlm_state(callback_context.state, "result_json_path")
+        if result_json_path:
+            stdout, stderr = self._load_from_result_json(result_json_path)
+            if stdout is not None or stderr is not None:
+                source = "result_json"
 
-        # Try loading from ArtifactService if keys are available
-        try:
-            if stdout_key and hasattr(callback_context, "load_artifact"):
-                stdout_part = callback_context.load_artifact(filename=stdout_key)
-                if stdout_part:
-                    stdout = stdout_part.text if hasattr(stdout_part, "text") else str(stdout_part)
-        except Exception as e:
-            logger.debug(f"Could not load stdout artifact: {e}")
-
-        try:
-            if stderr_key and hasattr(callback_context, "load_artifact"):
-                stderr_part = callback_context.load_artifact(filename=stderr_key)
-                if stderr_part:
-                    stderr = stderr_part.text if hasattr(stderr_part, "text") else str(stderr_part)
-        except Exception as e:
-            logger.debug(f"Could not load stderr artifact: {e}")
-
-        # Fallback: check if stdout/stderr are in state directly
+        # Priority 2: Try ArtifactService keys (legacy path)
         if stdout is None:
-            stdout = callback_context.state.get("rlm:execution_stdout")
+            # Use dual-read for legacy artifact keys
+            stdout_key = get_rlm_state(callback_context.state, "stdout_artifact_key")
+            try:
+                if stdout_key and hasattr(callback_context, "load_artifact"):
+                    stdout_part = callback_context.load_artifact(filename=stdout_key)
+                    if stdout_part:
+                        stdout = stdout_part.text if hasattr(stdout_part, "text") else str(stdout_part)
+                        source = "artifact_service"
+            except Exception as e:
+                logger.debug(f"Could not load stdout artifact: {e}")
+
         if stderr is None:
-            stderr = callback_context.state.get("rlm:execution_stderr")
+            stderr_key = get_rlm_state(callback_context.state, "stderr_artifact_key")
+            try:
+                if stderr_key and hasattr(callback_context, "load_artifact"):
+                    stderr_part = callback_context.load_artifact(filename=stderr_key)
+                    if stderr_part:
+                        stderr = stderr_part.text if hasattr(stderr_part, "text") else str(stderr_part)
+            except Exception as e:
+                logger.debug(f"Could not load stderr artifact: {e}")
+
+        # Priority 3: Fallback to state (may be truncated preview)
+        if stdout is None:
+            # Use dual-read for execution output
+            stdout = get_rlm_state(callback_context.state, "execution_stdout")
+            if stdout:
+                source = "state"
+                # Note if this is truncated (dual-read)
+                if get_rlm_state(callback_context.state, "stdout_truncated"):
+                    logger.info(
+                        f"[{self.name}] Using truncated stdout from state "
+                        f"(result.json not available)"
+                    )
+        if stderr is None:
+            stderr = get_rlm_state(callback_context.state, "execution_stderr")
+
+        if self._enable_logging:
+            logger.info(f"[{self.name}] Loaded output from source: {source}")
 
         # Format the injection content
         content_text = self._format_injection_content(

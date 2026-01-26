@@ -21,6 +21,7 @@
 #   --skip-deploy           Skip deployment, just run the job
 #   --skip-cluster-check    Skip cluster check/start
 #   --run                   Trigger orchestrator job after deploy
+#   --test-level <N>        Pass TEST_LEVEL=<N> to the job (requires --run)
 #   --force-update-secrets  Always overwrite job ID secrets (default: update if missing or changed)
 #   --help                  Show this help message
 #
@@ -54,13 +55,14 @@ SKIP_DEPLOY=false
 SKIP_CLUSTER_CHECK=false
 RUN_AFTER_DEPLOY=false
 FORCE_UPDATE_SECRETS=false
+TEST_LEVEL=""
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
 show_help() {
-    head -30 "$0" | tail -28 | sed 's/^# //' | sed 's/^#//'
+    head -31 "$0" | tail -29 | sed 's/^# //' | sed 's/^#//'
     exit 0
 }
 
@@ -152,6 +154,10 @@ while [[ $# -gt 0 ]]; do
         --run)
             RUN_AFTER_DEPLOY=true
             shift
+            ;;
+        --test-level)
+            TEST_LEVEL="$2"
+            shift 2
             ;;
         --force-update-secrets)
             FORCE_UPDATE_SECRETS=true
@@ -527,7 +533,14 @@ if [[ "$RUN_AFTER_DEPLOY" == "true" ]]; then
     echo "=============================================="
     
     cd "$PROJECT_ROOT"
-    uv run scripts/run_and_wait.py --job-id "$ORCHESTRATOR_JOB_ID" --profile "$DATABRICKS_PROFILE"
+    
+    RUN_ARGS=("--job-id" "$ORCHESTRATOR_JOB_ID" "--profile" "$DATABRICKS_PROFILE")
+    if [[ -n "$TEST_LEVEL" ]]; then
+        RUN_ARGS+=("--param" "TEST_LEVEL=$TEST_LEVEL")
+        log_info "Running with test level: $TEST_LEVEL"
+    fi
+
+    uv run scripts/run_and_wait.py "${RUN_ARGS[@]}"
     EXIT_CODE=$?
     
     if [[ $EXIT_CODE -eq 0 ]]; then
