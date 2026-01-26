@@ -14,6 +14,7 @@ from .model_factory import (
 from .fallback_router import (
     FallbackRouter,
     is_blocking_error,
+    get_fallback_router,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "get_model_config",
     "FallbackRouter",
     "is_blocking_error",
+    "get_fallback_router",
 ]

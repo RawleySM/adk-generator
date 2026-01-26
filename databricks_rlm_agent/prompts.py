@@ -33,6 +33,8 @@ IMPORTANT:
 - There is no interactive Python REPL. Do not write ```repl``` blocks.
 - Do not call `exit_loop()` from within delegated Python code; `exit_loop` is a tool available to the agent, not a function in the executor.
 - Use `delegate_code_results` to run code and to ask the results processor to perform longer-form semantic analysis based on stdout/stderr and your `result` variable.
+- Tool calls are structured. When you call a tool, pass arguments as plain strings/values (do not emit Python-call syntax as normal text).
+- When passing large multiline code into `delegate_code_results`, avoid nested triple-quote patterns that can confuse tool-call argument formatting.
 
 ---
 
@@ -44,11 +46,10 @@ Call `metadata_keyword_search(keyword="people_data_labs|enrichment|company", ope
 
 Then delegate code to evaluate which tables have columns suitable for vendor enrichment:
 
-Call `delegate_code_results` with a blob like:
+Call the `delegate_code_results` tool with `code` set to a multiline string like:
 
 ```python
-delegate_code_results(r'''
-Analyze the discovered enrichment tables for vendor enrichment viability.
+'''Analyze the discovered enrichment tables for vendor enrichment viability.
 For each table, classify viability HIGH/MEDIUM/LOW and explain briefly.
 Look for columns like company name, address, phone, website, industry codes, employee count, revenue.
 Return a concise ranked shortlist of HIGH viability tables.
@@ -70,7 +71,6 @@ for r in rows[:10]:
     print(f"- {r['path']}: {str(r['column_array'])[:200]}")
 
 result = [{"path": r["path"], "column_array": r["column_array"]} for r in rows]
-''')
 ```
 
 ---
@@ -84,8 +84,7 @@ When you need to find API specifications and code for writing to the masterdata 
 3) Delegate code to read and print small excerpts (or structured extraction) for the results processor:
 
 ```python
-delegate_code_results(r'''
-Review the downloaded API/spec files for masterdata vendor write operations.
+'''Review the downloaded API/spec files for masterdata vendor write operations.
 Extract endpoints, required fields, auth, and example request/response formats.
 Keep the summary concise and cite file paths.
 '''
@@ -96,7 +95,6 @@ base = Path("/Volumes/silo_dev_rs/repos/git_downloads")
 
 print("Scanning downloaded files under:", base)
 result = {"files_reviewed": [], "notes": "Populate repo_name and file list from get_repo_file output."}
-''')
 ```
 
 ---
@@ -108,8 +106,7 @@ For analyzing vendors across multiple hospital chains (silos), decompose by silo
 Use `metadata_keyword_search` to discover candidate vendor tables (or directly hardcode known paths), then delegate code to compute metrics:
 
 ```python
-delegate_code_results(r'''
-Analyze vendor data quality across multiple silos.
+'''Analyze vendor data quality across multiple silos.
 Compute completeness metrics (tax_id/address/phone), highlight inconsistencies, and flag potential duplicates.
 Provide an aggregate, cross-silo summary and prioritized enrichment recommendations.
 '''
@@ -144,7 +141,6 @@ for silo in silos:
 
 print("Computed metrics for", len(metrics), "silos/tables")
 result = metrics
-''')
 ```
 
 ---
@@ -158,8 +154,7 @@ Delegate code for compute-heavy pieces (discovery, profiling, view creation). Fo
 Example pattern:
 
 ```python
-delegate_code_results(r'''
-Generate and optionally execute a CREATE VIEW statement that joins masterdata vendors to an enrichment source.
+'''Generate and optionally execute a CREATE VIEW statement that joins masterdata vendors to an enrichment source.
 Print the generated SQL and validate it by running spark.sql(...) if safe.
 '''
 # TODO: replace with real tables/columns discovered earlier
@@ -179,7 +174,6 @@ LEFT JOIN " + source_tbl + " e
 
 print(view_sql)
 result = {"view_sql": view_sql}
-''')
 ```
 ---
 

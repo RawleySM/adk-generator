@@ -172,7 +172,12 @@ class JobBuilderAgent(BaseAgent):
         print(f"[JOB_BUILDER] Processing artifact: {artifact_id}")
         logger.info(f"[JOB_BUILDER] Starting job submission for artifact: {artifact_id}")
 
-        # Step 2: Check executor job configuration - HARD ERROR if missing
+        # Step 2: Ensure executor job configuration is available.
+        # NOTE: In Databricks Jobs on an existing cluster, job "parameters" are not
+        # environment variables. The orchestrator CLI attempts to materialize
+        # ADK_EXECUTOR_JOB_ID into os.environ before importing agent.py, but this
+        # agent also re-checks at runtime to avoid caching a missing value.
+        self._ensure_executor_job_id_loaded()
         if not self._executor_job_id:
             error_msg = (
                 "FATAL: No executor job ID configured. Set ADK_EXECUTOR_JOB_ID env var, "
@@ -200,7 +205,7 @@ class JobBuilderAgent(BaseAgent):
         if code_artifact_key:
             try:
                 # Load from ArtifactService (Job_A-local storage)
-                code_part = ctx.load_artifact(filename=code_artifact_key)
+                code_part = self._load_artifact_part(ctx, code_artifact_key)
                 if code_part:
                     agent_code = code_part.text if hasattr(code_part, "text") else str(code_part)
                     logger.info(f"[JOB_BUILDER] Loaded code from artifact: {code_artifact_key}")
@@ -255,6 +260,20 @@ class JobBuilderAgent(BaseAgent):
 
         print(f"[JOB_BUILDER] Execution completed: success={result.get('success')}")
         logger.info(f"[JOB_BUILDER] Executor job completed: {result}")
+
+        # If the executor failed, stop the loop immediately.
+        # We rely on the executor as the secure execution plane; if it fails,
+        # we should not continue iterating or attempt follow-on analysis steps
+        # that might assume code execution succeeded.
+        if not result.get("success", False):
+            error_msg = (
+                "FATAL: Executor run failed; halting workflow. "
+                f"run_url={result.get('run_url', 'N/A')}"
+            )
+            logger.error(f"[JOB_BUILDER] {error_msg}")
+            state_delta = self._set_failure_state(ctx, error_msg, state_delta)
+            yield self._create_error_event(ctx, error_msg, state_delta)
+            return
 
         # Step 7: Load result.json from UC Volumes (primary source)
         # The executor writes full stdout/stderr to result.json in the same
@@ -331,6 +350,70 @@ class JobBuilderAgent(BaseAgent):
         )
 
         yield self._create_text_event(ctx, summary, is_final=True, state_delta=state_delta)
+
+    def _load_artifact_part(self, ctx: InvocationContext, filename: str) -> Optional[types.Part]:
+        """Load an artifact part from the configured ArtifactService.
+
+        ADK context APIs vary by version; try the direct context helper first,
+        then fall back to the artifact_service instance if exposed.
+        """
+        if hasattr(ctx, "load_artifact"):
+            return ctx.load_artifact(filename=filename)
+
+        artifact_service = getattr(ctx, "artifact_service", None)
+        if artifact_service and hasattr(artifact_service, "load_artifact"):
+            # Some ArtifactService implementations require app_name/user_id.
+            try:
+                return artifact_service.load_artifact(filename=filename)
+            except TypeError:
+                app_name = getattr(getattr(ctx, "session", None), "app_name", None) or os.environ.get(
+                    "ADK_APP_NAME", "databricks_rlm_agent"
+                )
+                user_id = getattr(getattr(ctx, "session", None), "user_id", None) or os.environ.get(
+                    "ADK_DEFAULT_USER_ID", "job_user"
+                )
+                return artifact_service.load_artifact(
+                    filename=filename,
+                    app_name=app_name,
+                    user_id=user_id,
+                )
+
+        logger.warning("[JOB_BUILDER] ArtifactService not available on InvocationContext")
+        return None
+
+    def _ensure_executor_job_id_loaded(self) -> None:
+        """Best-effort lazy load for executor job id.
+
+        JobBuilderAgent is constructed during agent import time; if the orchestrator
+        hasn't materialized ADK_EXECUTOR_JOB_ID into the environment yet, this can
+        otherwise be cached as None. We re-check env and (on Databricks) secret scope.
+        """
+        if self._executor_job_id:
+            return
+
+        # 1) Environment variable (preferred once materialized)
+        env_val = os.environ.get("ADK_EXECUTOR_JOB_ID")
+        if env_val:
+            try:
+                self._executor_job_id = int(env_val)
+                return
+            except ValueError:
+                logger.warning(f"[JOB_BUILDER] Invalid ADK_EXECUTOR_JOB_ID value: {env_val!r}")
+
+        # 2) Databricks Secrets fallback (dbutils)
+        try:
+            from pyspark.sql import SparkSession
+            from pyspark.dbutils import DBUtils
+
+            spark = SparkSession.builder.getOrCreate()
+            dbutils = DBUtils(spark)
+            secret_scope = os.environ.get("ADK_SECRET_SCOPE", "adk-secrets")
+            secret_val = dbutils.secrets.get(scope=secret_scope, key="rlm-executor-job-id")
+            if secret_val:
+                self._executor_job_id = int(secret_val)
+                os.environ["ADK_EXECUTOR_JOB_ID"] = str(self._executor_job_id)
+        except Exception as e:
+            logger.debug(f"[JOB_BUILDER] Could not load executor job id from secrets: {e}")
 
     def _create_text_event(
         self,

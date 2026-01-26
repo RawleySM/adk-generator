@@ -6,7 +6,6 @@ This tool searches two metadata tables:
 """
 
 import os
-from typing import Optional
 from google.adk.tools import ToolContext
 
 DEFAULT_PROFILE = os.environ.get("DATABRICKS_PROFILE", "rstanhope")
@@ -24,7 +23,8 @@ def metadata_keyword_search(
     keyword: str,
     table_type: str = "columnnames",
     operator: str = "LIKE",
-    tool_context: Optional[ToolContext] = None,
+    *,
+    tool_context: ToolContext,
 ) -> dict:
     """
     Search Unity Catalog metadata tables for tables matching keyword patterns.
@@ -101,7 +101,7 @@ def metadata_keyword_search(
                           - "provenance": Search operation history
         operator (str): SQL operator - "LIKE", "NOT LIKE", "=", "!=" (default: "LIKE")
                         Note: | OR-patterns only work with LIKE/NOT LIKE operators.
-        tool_context (ToolContext, optional): The tool context for state management.
+        tool_context (ToolContext): Provided by ADK at runtime.
 
     Returns:
         dict: Search results with keys:

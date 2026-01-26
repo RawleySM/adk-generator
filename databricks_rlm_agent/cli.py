@@ -26,9 +26,9 @@ def _setup_logging():
     """Configure logging for CLI execution."""
     import logging
 
-    log_level = os.environ.get("ADK_LOG_LEVEL", "DEBUG").upper()
+    log_level = os.environ.get("ADK_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=getattr(logging, log_level, logging.DEBUG),
+        level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
@@ -263,6 +263,51 @@ def orchestrator_main():
     args.user_id = args.user_id or _get_job_parameter("ADK_USER_ID", "job_user")
     args.prompt = args.prompt or _get_job_parameter("ADK_PROMPT", "")
     args.max_iterations = args.max_iterations or int(_get_job_parameter("ADK_MAX_ITERATIONS", "1"))
+
+    # IMPORTANT (Databricks Jobs):
+    # Job "parameters" are NOT environment variables on existing clusters.
+    # Our agent graph (imported in create_runner) reads config from os.environ
+    # at import/init time (e.g., JobBuilderAgent reads ADK_EXECUTOR_JOB_ID).
+    # Therefore we must materialize key job parameters into env vars BEFORE
+    # calling create_runner() (which imports agent.py and constructs sub-agents).
+    os.environ["ADK_DELTA_CATALOG"] = args.catalog
+    os.environ["ADK_DELTA_SCHEMA"] = args.schema
+    os.environ["ADK_SECRET_SCOPE"] = _get_job_parameter(
+        "ADK_SECRET_SCOPE",
+        os.environ.get("ADK_SECRET_SCOPE", "adk-secrets"),
+    )
+    os.environ["ADK_ARTIFACTS_PATH"] = _get_job_parameter(
+        "ADK_ARTIFACTS_PATH",
+        os.environ.get("ADK_ARTIFACTS_PATH", "/Volumes/silo_dev_rs/adk/artifacts"),
+    )
+    # Model selection/config (used at import time by agent/model factory)
+    os.environ["ADK_MODEL_PROVIDER"] = _get_job_parameter(
+        "ADK_MODEL_PROVIDER",
+        os.environ.get("ADK_MODEL_PROVIDER", "gemini"),
+    )
+    os.environ["ADK_GEMINI_MODEL"] = _get_job_parameter(
+        "ADK_GEMINI_MODEL",
+        os.environ.get("ADK_GEMINI_MODEL", "gemini-3-pro-preview"),
+    )
+    os.environ["ADK_LITELLM_MODEL"] = _get_job_parameter(
+        "ADK_LITELLM_MODEL",
+        os.environ.get("ADK_LITELLM_MODEL", "openai/gpt-4o"),
+    )
+    os.environ["ADK_LITELLM_FALLBACK_MODELS"] = _get_job_parameter(
+        "ADK_LITELLM_FALLBACK_MODELS",
+        os.environ.get("ADK_LITELLM_FALLBACK_MODELS", ""),
+    )
+    os.environ["ADK_FALLBACK_ON_BLOCKED"] = _get_job_parameter(
+        "ADK_FALLBACK_ON_BLOCKED",
+        os.environ.get("ADK_FALLBACK_ON_BLOCKED", "true"),
+    )
+    os.environ["ADK_FALLBACK_GEMINI_TO_LITELLM"] = _get_job_parameter(
+        "ADK_FALLBACK_GEMINI_TO_LITELLM",
+        os.environ.get("ADK_FALLBACK_GEMINI_TO_LITELLM", "true"),
+    )
+    executor_job_id_param = _get_job_parameter("ADK_EXECUTOR_JOB_ID", "")
+    if executor_job_id_param:
+        os.environ["ADK_EXECUTOR_JOB_ID"] = executor_job_id_param
 
     # Resolve prompt file: CLI arg -> job parameter -> default path
     args.prompt_file = args.prompt_file or _get_job_parameter(

@@ -3,8 +3,8 @@ Progressive difficulty test tasks for evaluating databricks_analyst agent.
 
 Each task is designed to test deep exploration and probing behaviors:
 - Codebase discovery via GitHub tools (repo_filename_search, get_repo_file)
-- UC metadata mining via silo_dev_rs.metadata.columnnames
-- Iterative reasoning with delegate_code_results to avoid context rot
+- UC metadata mining via metadata_keyword_search tool
+- Code execution and result processing via delegate_code_results
 - Building specs and execution plans from vague Jira tasks
 - Recursive exploration across code and data domains
 
@@ -56,8 +56,8 @@ TASK_LEVEL_1 = TestTask(
 Perform a minimal probe that validates UC and repo access before deeper tasks.
 
 **Deliverables:**
-- Run a simple UC query with @scripts/execute_sql.py to confirm access.
-- Query silo_dev_rs.metadata.columnnames for 3 random tables to validate schema discovery.
+- Run a simple UC query using delegate_code_results to confirm access.
+- Use metadata_keyword_search to discover 3 random tables and validate schema discovery.
 - Use repo_filename_search to find 3 files related to "agent" or "workflow" in any repo.
 - Briefly summarize what domains you can access.
 - A short access check report (1 paragraph)
@@ -85,7 +85,7 @@ TASK_LEVEL_2 = TestTask(
     issue_key="EVAL-002",
     summary="Sample Jira tasks and hypothesize data scope",
     description="""
-Use @scripts/execute_sql.py to sample 10 Jira tasks from
+Use delegate_code_results to sample 10 Jira tasks from
 silo_dev_rs.task.jira_raw_data. Select a handful of fields that summarize each task.
 
 **Deliverables:**
@@ -97,7 +97,7 @@ silo_dev_rs.task.jira_raw_data. Select a handful of fields that summarize each t
 - Relevant UC tables + repo files
 
 **Acceptance Criteria:**
-- Uses execute_sql.py for sampling
+- Uses delegate_code_results for sampling
 - Demonstrates cross-domain reasoning (Jira -> data + code)
 """,
     priority="Low",
@@ -115,7 +115,7 @@ TASK_LEVEL_3 = TestTask(
     issue_key="EVAL-003",
     summary="Discover data domains using columnnames metadata",
     description="""
-Use silo_dev_rs.metadata.columnnames to discover tables that indicate
+Use metadata_keyword_search tool to discover tables that indicate
 workflows, jobs, tasks, tickets, or audits. Use columnname pattern searches
 like 'workflow', 'task', 'jira', 'audit', 'status', 'phase', 'owner'.
 
@@ -125,7 +125,7 @@ like 'workflow', 'task', 'jira', 'audit', 'status', 'phase', 'owner'.
 3. A short narrative explaining why these domains matter for agent behavior
 
 **Acceptance Criteria:**
-- Uses metadata.columnnames as the primary discovery tool
+- Uses metadata_keyword_search as the primary discovery tool
 - Clear grouping by domain
 - Delegate summarization for compact output
 """,
@@ -146,7 +146,7 @@ TASK_LEVEL_4 = TestTask(
     description="""
 Use repo_filename_search and get_repo_file to locate code related to
 workflows, agents, tasks, or Jira ingestion across any available repos.
-Then connect those code paths to relevant UC tables from metadata.columnnames.
+Then connect those code paths to relevant UC tables via metadata_keyword_search.
 
 **Deliverables:**
 1. 5-8 code files that appear relevant (with brief rationale)
@@ -183,7 +183,7 @@ Turn it into a concrete exploration plan spanning code, UC tables, and views.
 
 **Acceptance Criteria:**
 - Jira-driven plan is concrete and cross-domain
-- Includes metadata.columnnames and GitHub tool usage
+- Includes metadata_keyword_search and GitHub tool usage
 """,
     priority="Medium",
     story_points=5.0,
@@ -200,9 +200,9 @@ TASK_LEVEL_6 = TestTask(
     issue_key="EVAL-006",
     summary="Recursive probe: discover workflow tables and validate with samples",
     description="""
-Start from metadata.columnnames to discover workflow/task-related tables.
-Then validate the top 5 candidates by sampling rows (limit 5) with
-@scripts/execute_sql.py.
+Start from metadata_keyword_search to discover workflow/task-related tables.
+Then validate the top 5 candidates by sampling rows (limit 5) using
+delegate_code_results.
 
 **Deliverables:**
 1. A ranked list of 10 candidate tables with reasons
@@ -210,7 +210,7 @@ Then validate the top 5 candidates by sampling rows (limit 5) with
 3. Updated hypothesis: which tables are likely authoritative
 
 **Acceptance Criteria:**
-- Uses metadata.columnnames for discovery
+- Uses metadata_keyword_search for discovery
 - Validates top candidates with data samples
 """,
     priority="Medium",
@@ -234,14 +234,14 @@ the likely lineage from Jira -> code paths -> UC tables/views.
 **Deliverables:**
 1. Jira task summary + assumed system context
 2. GitHub tool-based file discovery with 5-10 relevant files
-3. UC table discovery using metadata.columnnames
+3. UC table discovery using metadata_keyword_search
 4. A text lineage map (code -> tables -> views)
 5. Evidence: sample queries for key tables
 
 **Acceptance Criteria:**
 - Clear cross-domain lineage narrative
-- Uses GitHub tools + UC metadata
-- Uses execute_sql.py for sampling
+- Uses repo_filename_search, get_repo_file + metadata_keyword_search
+- Uses delegate_code_results for sampling
 """,
     priority="High",
     story_points=8.0,
@@ -271,7 +271,7 @@ sample tables. The objective is to produce a spec and a plan, not to build.
 
 **Acceptance Criteria:**
 - Spec is grounded in evidence from code + UC metadata
-- Uses GitHub tools + execute_sql.py sampling
+- Uses repo_filename_search, get_repo_file + delegate_code_results for sampling
 """,
     priority="High",
     story_points=8.0,
@@ -298,8 +298,8 @@ vague and hints at "workflow automation" and "task intelligence".
    - Use repo_filename_search to locate 20-30 candidate files
    - Pull 5-8 key files via get_repo_file and summarize their purpose
 2. **UC Recon:**
-   - Use metadata.columnnames to identify tables for tasks, workflows, audits
-   - Validate top 10 tables with execute_sql.py sampling
+   - Use metadata_keyword_search to identify tables for tasks, workflows, audits
+   - Validate top 10 tables with delegate_code_results sampling
 3. **Coverage Map:**
    - Create a cross-domain map: features -> code modules -> tables/views
 4. **Gaps & Risks:**

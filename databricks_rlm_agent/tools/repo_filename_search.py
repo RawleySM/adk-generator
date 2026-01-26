@@ -25,7 +25,8 @@ def repo_filename_search(
     operator: str = "LIKE",
     table_filter: Optional[str] = None,
     filetype_filter: Optional[str] = None,
-    tool_context: Optional[ToolContext] = None,
+    *,
+    tool_context: ToolContext,
 ) -> dict:
     """
     Search repository files for matching filenames, paths, or tables referenced.
@@ -134,7 +135,7 @@ def repo_filename_search(
                                       NOTE: Currently unpopulated - will return no results.
         filetype_filter (str, optional): Filter by file extension(s). Use | for OR
                                          (e.g., "py|sql" for Python or SQL files).
-        tool_context (ToolContext, optional): The tool context for state management.
+        tool_context (ToolContext): Provided by ADK at runtime.
 
     Returns:
         dict: Search results with keys:

@@ -61,11 +61,11 @@ resources:
           default: ""  # Test task level (1-10) - bypasses ingestor polling for E2E testing
         # Model provider configuration
         - name: ADK_MODEL_PROVIDER
-          default: "gemini"  # "gemini" (native ADK) or "litellm" (multi-provider)
+          default: "litellm"  # "gemini" (native ADK) or "litellm" (multi-provider)
         - name: ADK_GEMINI_MODEL
-          default: "gemini-3-pro-preview"  # Model for native Gemini provider
+          default: "gemini-3-pro-preview"  # Model for native Gemini provider (unused when litellm)
         - name: ADK_LITELLM_MODEL
-          default: "openai/gpt-4o"  # Primary model for LiteLLM provider
+          default: "openai/gpt-5.2"  # Primary model for LiteLLM provider
         - name: ADK_LITELLM_FALLBACK_MODELS
           default: ""  # Comma-separated fallback chain (e.g., "openai/gpt-4o-mini,anthropic/claude-3-haiku-20240307")
         - name: ADK_FALLBACK_ON_BLOCKED

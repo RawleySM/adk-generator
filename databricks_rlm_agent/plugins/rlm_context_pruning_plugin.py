@@ -142,11 +142,13 @@ class RlmContextPruningPlugin(BasePlugin):
         self,
         *,
         callback_context: CallbackContext,
+        **kwargs,  # Accept additional ADK-provided arguments (e.g., agent)
     ) -> Optional[types.Content]:
         """Prune state after results_processor completes.
 
         Args:
             callback_context: The callback context with agent and state info.
+            **kwargs: Additional ADK-provided keyword arguments.
 
         Returns:
             None (this plugin doesn't inject content after agent runs).

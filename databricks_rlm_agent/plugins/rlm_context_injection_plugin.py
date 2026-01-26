@@ -201,11 +201,13 @@ class RlmContextInjectionPlugin(BasePlugin):
         self,
         *,
         callback_context: CallbackContext,
+        **kwargs,  # Accept additional ADK-provided arguments (e.g., agent)
     ) -> Optional[types.Content]:
         """Inject execution context before results_processor runs.
 
         Args:
             callback_context: The callback context with agent and state info.
+            **kwargs: Additional ADK-provided keyword arguments.
 
         Returns:
             types.Content with injected context, or None to skip injection.

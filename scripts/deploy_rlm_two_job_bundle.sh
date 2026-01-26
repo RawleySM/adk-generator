@@ -195,6 +195,7 @@ CLUSTER_ID="${CLUSTER_ID:-1115-120035-jyzgoasz}"
 SECRET_SCOPE="${SECRET_SCOPE:-adk-secrets}"
 BUNDLE_TARGET="${BUNDLE_TARGET:-dev}"
 GOOGLE_API_KEY="${GOOGLE_API_KEY:-}"
+OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 
 echo ""
 echo "=============================================="
@@ -357,7 +358,13 @@ if [[ -z "$INGESTOR_JOB_ID" || "$INGESTOR_JOB_ID" == "null" ]]; then
     log_error "Could not resolve ingestor job ID"
     exit 1
 fi
-log_success "Ingestor Job ID: $INGESTOR_JOB_ID"
+if databricks jobs get "$INGESTOR_JOB_ID" --profile "$DATABRICKS_PROFILE" --output json >/dev/null 2>&1; then
+    log_success "Ingestor Job ID: $INGESTOR_JOB_ID"
+else
+    log_warn "Resolved ingestor job ID does not exist: $INGESTOR_JOB_ID"
+    log_warn "Skipping ingestor wiring; orchestrator can still run."
+    INGESTOR_JOB_ID=""
+fi
 
 # =============================================================================
 # Step 7: Ensure Secret Scope Exists
@@ -394,6 +401,22 @@ else
     log_error "The agent requires a valid Google API key to function."
     log_error "Please set GOOGLE_API_KEY in your .env file and redeploy."
     exit 1
+fi
+
+# Optional: OpenAI API key (needed for LiteLLM OpenAI models)
+OPENAI_KEY_EXISTS=$(databricks secrets list-secrets "$SECRET_SCOPE" --profile "$DATABRICKS_PROFILE" --output json 2>/dev/null | \
+    jq -r '.[]? | select(.key == "openai-api-key") | .key' || echo "")
+
+if [[ -n "$OPENAI_API_KEY" && "$OPENAI_API_KEY" != "your-openai-api-key-here" ]]; then
+    log_info "Storing openai-api-key in secret scope..."
+    echo -n "$OPENAI_API_KEY" | databricks secrets put-secret "$SECRET_SCOPE" "openai-api-key" --profile "$DATABRICKS_PROFILE" 2>/dev/null || \
+        databricks secrets put-secret "$SECRET_SCOPE" "openai-api-key" --string-value "$OPENAI_API_KEY" --profile "$DATABRICKS_PROFILE"
+    log_success "openai-api-key stored"
+elif [[ -n "$OPENAI_KEY_EXISTS" ]]; then
+    log_success "openai-api-key already exists in secret scope"
+else
+    log_warn "OPENAI_API_KEY not set in .env and not found in secret scope '$SECRET_SCOPE'"
+    log_warn "LiteLLM OpenAI models will fail without this key."
 fi
 
 # =============================================================================
@@ -457,7 +480,10 @@ fi
 # Step 10: Wire Orchestrator Job ID into Ingestor Job Parameters
 # =============================================================================
 
-log_info "[10/11] Wiring orchestrator job ID into ingestor job..."
+if [[ -z "$INGESTOR_JOB_ID" ]]; then
+    log_warn "[10/11] Skipping ingestor wiring (no valid ingestor job ID)"
+else
+    log_info "[10/11] Wiring orchestrator job ID into ingestor job..."
 
 # Get current ingestor job settings (new CLI syntax: JOB_ID as positional argument)
 INGESTOR_PARAMS=$(databricks jobs get "$INGESTOR_JOB_ID" --profile "$DATABRICKS_PROFILE" --output json 2>/dev/null | \
@@ -486,12 +512,13 @@ else
     }' -c)
 
     # Update the job (CLI requires job_id in JSON when using --json flag)
-    if databricks jobs update --profile "$DATABRICKS_PROFILE" --json "$INGESTOR_UPDATE_PAYLOAD" 2>/dev/null; then
+if databricks jobs update --profile "$DATABRICKS_PROFILE" --json "$INGESTOR_UPDATE_PAYLOAD" 2>/dev/null; then
         log_success "Ingestor job updated with ADK_ORCHESTRATOR_JOB_ID=$ORCHESTRATOR_JOB_ID"
     else
         log_warn "Could not update ingestor job parameters via API (may require manual configuration)"
         log_warn "Set ADK_ORCHESTRATOR_JOB_ID=$ORCHESTRATOR_JOB_ID in the ingestor job"
     fi
+fi
 fi
 
 # =============================================================================

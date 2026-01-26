@@ -64,7 +64,7 @@ STATE_TEMP_PARSED_BLOB = "temp:parsed_blob"
 STATE_ITERATION = "rlm:iteration"
 
 
-def delegate_code_results(code: str, tool_context: ToolContext) -> dict[str, Any]:
+async def delegate_code_results(code: str, tool_context: ToolContext) -> dict[str, Any]:
     """Delegate code execution and results processing to the RLM workflow.
 
     This tool saves generated code for execution by job_builder and sets up
@@ -134,7 +134,10 @@ def delegate_code_results(code: str, tool_context: ToolContext) -> dict[str, Any
     code_artifact_key = f"{artifact_id}_code.py"
     try:
         code_part = types.Part.from_text(text=parsed.agent_code)
-        version = tool_context.save_artifact(filename=code_artifact_key, artifact=code_part)
+        version = await tool_context.save_artifact(
+            filename=code_artifact_key,
+            artifact=code_part,
+        )
         logger.info(f"Saved code artifact: {code_artifact_key} (version {version})")
         print(f"[DELEGATE_CODE_RESULTS] Saved code artifact: {code_artifact_key}")
     except Exception as e:
@@ -206,9 +209,15 @@ def delegate_code_results(code: str, tool_context: ToolContext) -> dict[str, Any
         f"artifact_id={artifact_id}, iteration={new_iteration}"
     )
 
-    # Trigger escalation to let LoopAgent invoke job_builder
-    tool_context.actions.escalate = True
-    print(f"[DELEGATE_CODE_RESULTS] Escalation triggered")
+    # IMPORTANT:
+    # In an ADK LoopAgent, `escalate=True` terminates the loop (see ADK docs).
+    # For delegation, we want to halt the current LLM agent and hand off control
+    # to the deterministic `job_builder` agent, which writes the code file to UC
+    # Volumes and submits Job_B.
+    #
+    # Therefore: use `transfer_to_agent`, not `escalate`.
+    tool_context.actions.transfer_to_agent = "job_builder"
+    print("[DELEGATE_CODE_RESULTS] Transfer to agent: job_builder")
 
     return {
         "status": "success",
@@ -255,14 +264,11 @@ Args:
 Returns:
     dict with status, artifact_id, and delegation details.
 
-Example:
-    delegate_code_results('''
-    '''Analyze vendor distribution across silos and identify duplicates.'''
+Example (the `code` argument value):
+    \"\"\"Analyze vendor distribution across silos and identify duplicates.\"\"\"
     import pandas as pd
-
     df = spark.sql("SELECT * FROM vendors").toPandas()
-    vendor_counts = df.groupby('vendor_name').size()
+    vendor_counts = df.groupby("vendor_name").size()
     print(f"Total vendors: {len(df)}")
     print(f"Duplicate vendors: {(vendor_counts > 1).sum()}")
-    ''')
 """

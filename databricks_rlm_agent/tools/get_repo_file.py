@@ -288,7 +288,8 @@ def get_repo_file(
     repo_name: Optional[str] = None,
     branch: str = "main",
     target_volume: str = DEFAULT_TARGET_VOLUME,
-    tool_context: Optional[ToolContext] = None,
+    *,
+    tool_context: ToolContext,
 ) -> dict:
     """
     Downloads repository files from GitHub to a Unity Catalog Volume.

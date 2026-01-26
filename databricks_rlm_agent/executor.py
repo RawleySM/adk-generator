@@ -119,6 +119,25 @@ def execute_artifact(
             "run_id": run_id,
             "iteration": iteration,
         }
+
+        # Safety: prevent generated code from stopping the shared SparkSession.
+        # Some generated notebooks/scripts call `spark.stop()`. In Databricks jobs,
+        # that can tear down the active SparkContext and cause follow-on failures
+        # (e.g., telemetry writes via spark.sql) with errors like:
+        # "SparkSession does not exist in the JVM" / "no active spark context".
+        try:
+            original_stop = getattr(spark, "stop", None)
+
+            def _no_op_stop(*args, **kwargs):  # noqa: ANN001
+                logger.warning(
+                    "Generated code attempted to call spark.stop(); ignoring to keep executor alive."
+                )
+
+            if callable(original_stop):
+                spark.stop = _no_op_stop  # type: ignore[method-assign]
+        except Exception:
+            # If monkeypatching fails, continue; worst case the code can still stop Spark.
+            logger.debug("Could not patch spark.stop()", exc_info=True)
         
         # Add commonly used imports to the execution environment
         exec_globals["os"] = os
