@@ -18,7 +18,7 @@ Workflow:
                                                                                ↓
                                                                  results_processor_agent (with injected context)
                                                                                ↓
-                                                                         context pruning → loop continues
+                                                                         stage="processed" → loop continues
 """
 
 import os
@@ -39,7 +39,6 @@ from databricks_rlm_agent.plugins import (
     FormattingCheckPlugin,
     CodeLintingPlugin,
     RlmContextInjectionPlugin,
-    RlmContextPruningPlugin,
 )
 
 # Import agents
@@ -162,14 +161,9 @@ linting_plugin = CodeLintingPlugin(
 )
 
 # Context Injection Plugin: Injects execution results into results_processor_agent
+# Also handles stage tracking (before: gate on "executed", after: set "processed")
 context_injection_plugin = RlmContextInjectionPlugin(
     name="rlm_context_injection",
-    target_agent_name="results_processor",
-)
-
-# Context Pruning Plugin: Clears state after results_processor_agent completes
-context_pruning_plugin = RlmContextPruningPlugin(
-    name="rlm_context_pruning",
     target_agent_name="results_processor",
 )
 
@@ -205,9 +199,11 @@ job_builder = JobBuilderAgent(
 # Results Processor Agent: Analyzes execution results with injected context
 # The context_injection_plugin injects stdout/stderr and sublm_instruction
 # Model is selected via ADK_MODEL_PROVIDER env var (gemini or litellm)
+# output_key persists the final response to session state for analyst consumption
 results_processor_agent = LlmAgent(
     name="results_processor",
     model=_agent_model,
+    output_key="rlm:last_results_summary",  # Persist output to session state
     instruction="""You are a specialist sub-agent for processing code execution results.
 
 Your role is to:
@@ -252,7 +248,7 @@ root_agent = LoopAgent(
 # =============================================================================
 
 # Wrap the agent in the google-adk App class
-# Available Plugins (8 total):
+# Available Plugins (7 total):
 #   1. UcDeltaTelemetryPlugin     - UC Delta telemetry persistence + stdout logging (DEFAULT)
 #   2. LoggingPlugin              - Standard runtime logging at workflow callback points
 #   3. GlobalInstructionPlugin    - Injects global instructions into all agent interactions
@@ -260,9 +256,12 @@ root_agent = LoopAgent(
 #   5. FormattingCheckPlugin      - Validates delegation blob format
 #   6. CodeLintingPlugin          - Validates Python syntax before execution
 #   7. RlmContextInjectionPlugin  - Injects execution context to results_processor_agent
-#   8. RlmContextPruningPlugin    - Clears state after results_processor_agent completes
+#                                   + handles stage tracking (before/after callbacks)
 #
 # Note: UcDeltaTelemetryPlugin is the default. Set ADK_USE_LOGGING_PLUGIN=1 to use LoggingPlugin instead.
+# Note: RlmContextPruningPlugin has been removed - its responsibilities are now handled by:
+#   - Stage tracking: RlmContextInjectionPlugin (temp:rlm:stage state machine)
+#   - Artifact consumed: JobBuilderAgent (marks consumed on successful execution)
 app = App(
     name="adk_poc_plugins",
     root_agent=root_agent,
@@ -277,10 +276,8 @@ app = App(
         logging_plugin,
         # Step 5: Global instructions
         global_instruction_plugin,
-        # Step 6: Context injection for results_processor
+        # Step 6: Context injection for results_processor (+ stage tracking)
         context_injection_plugin,
-        # Step 7: Context pruning after results_processor
-        context_pruning_plugin,
     ]
 )
 
@@ -300,7 +297,6 @@ __all__ = [
     "formatting_plugin",
     "linting_plugin",
     "context_injection_plugin",
-    "context_pruning_plugin",
     # Tools
     "save_artifact_to_volumes",
     "exit_loop",

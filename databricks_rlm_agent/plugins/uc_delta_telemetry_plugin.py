@@ -4,12 +4,17 @@ A custom ADK plugin that:
 1. Preserves stdout print() logging for terminal observability (like LoggingPlugin)
 2. Persists callback-level telemetry to a Unity Catalog Delta table (adk_telemetry)
 3. Supports special logging flags for blocked tool executions (safety plugin integration)
+4. Captures invocation-context measurement for each LlmAgent context window:
+   - State token estimates (including and excluding temp: keys)
+   - Previous message token estimates
+   - LLM call indexing per (invocation_id, agent_name)
 
 Table: silo_dev_rs.adk.adk_telemetry (configurable via env vars)
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -34,6 +39,590 @@ if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helper functions for state/message metrics (Phase 1 & 2)
+# ---------------------------------------------------------------------------
+
+def _canonical_json(obj: Any) -> str:
+    """Serialize object to canonical JSON (sorted keys, no extra whitespace).
+
+    This ensures consistent hashing across runs regardless of dict ordering.
+
+    Args:
+        obj: The object to serialize.
+
+    Returns:
+        Canonical JSON string.
+    """
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _compute_sha256(data: str) -> str:
+    """Compute SHA-256 hash of a string.
+
+    Args:
+        data: The string to hash.
+
+    Returns:
+        Hex digest of the SHA-256 hash.
+    """
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Token estimation with tiktoken (with heuristic fallback)
+# ---------------------------------------------------------------------------
+
+# Module-level cache for tiktoken encoder (lazy loaded)
+_tiktoken_encoder = None
+_tiktoken_available = None
+
+
+def _get_tiktoken_encoder():
+    """Get or initialize the tiktoken encoder (lazy loaded).
+
+    Uses cl100k_base encoding which is stable and works well for most models.
+    Falls back gracefully if tiktoken is not available.
+
+    Returns:
+        Tuple of (encoder, is_available). Encoder is None if not available.
+    """
+    global _tiktoken_encoder, _tiktoken_available
+
+    if _tiktoken_available is None:
+        try:
+            import tiktoken
+            _tiktoken_encoder = tiktoken.get_encoding("cl100k_base")
+            _tiktoken_available = True
+            logger.debug("tiktoken encoder initialized (cl100k_base)")
+        except ImportError:
+            _tiktoken_encoder = None
+            _tiktoken_available = False
+            logger.info("tiktoken not available, using heuristic token estimation")
+        except Exception as e:
+            _tiktoken_encoder = None
+            _tiktoken_available = False
+            logger.warning(f"Failed to initialize tiktoken: {e}, using heuristic")
+
+    return _tiktoken_encoder, _tiktoken_available
+
+
+def _estimate_tokens(text: str, chars_per_token: float = 4.0) -> int:
+    """Estimate token count using tiktoken if available, else heuristic.
+
+    Uses tiktoken's cl100k_base encoding for accurate counts.
+    Falls back to character-based heuristic (~4 chars/token) if tiktoken
+    is not available or fails.
+
+    Args:
+        text: The text to estimate tokens for.
+        chars_per_token: Average characters per token for fallback (default 4.0).
+
+    Returns:
+        Estimated token count.
+    """
+    if not text:
+        return 0
+
+    encoder, available = _get_tiktoken_encoder()
+    if available and encoder is not None:
+        try:
+            return len(encoder.encode(text))
+        except Exception:
+            # Fall back to heuristic if encoding fails
+            pass
+
+    return max(1, int(len(text) / chars_per_token))
+
+
+def _get_token_estimation_metadata() -> dict[str, Any]:
+    """Get metadata about the token estimation method being used.
+
+    Returns:
+        Dictionary with estimation method metadata:
+        - method: 'tiktoken' or 'heuristic'
+        - encoding: encoding name if tiktoken (e.g., 'cl100k_base')
+    """
+    _, available = _get_tiktoken_encoder()
+    if available:
+        return {
+            "method": "tiktoken",
+            "encoding": "cl100k_base",
+        }
+    else:
+        return {
+            "method": "heuristic",
+            "chars_per_token": 4.0,
+        }
+
+
+def _filter_persistable_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Filter out temp: keys from state (these are not persisted).
+
+    Args:
+        state: The full state dictionary.
+
+    Returns:
+        State dictionary with only persistable keys (no temp:* keys).
+    """
+    return {k: v for k, v in state.items() if not k.startswith("temp:")}
+
+
+def _safe_state_to_dict(state_obj: Any) -> dict[str, Any]:
+    """Safely convert ADK State object to dict.
+
+    Workaround for State objects that implement __getitem__ but not __iter__,
+    causing dict() to try sequence iteration (accessing index 0).
+    """
+    # Try direct _value access (fastest and confirmed by traceback to exist)
+    if hasattr(state_obj, "_value") and isinstance(state_obj._value, dict):
+        return dict(state_obj._value)
+
+    # Try to_dict()
+    if hasattr(state_obj, "to_dict") and callable(state_obj.to_dict):
+        return state_obj.to_dict()
+
+    # Try keys()
+    if hasattr(state_obj, "keys") and callable(state_obj.keys):
+        return {k: state_obj[k] for k in state_obj.keys()}
+
+    # If it's already a dict
+    if isinstance(state_obj, dict):
+        return state_obj
+
+    # Last resort: try dict(), keeping the original error if it fails
+    return dict(state_obj)
+
+
+def _compute_state_metrics(state: dict[str, Any]) -> dict[str, Any]:
+    """Compute metrics for the current state.
+
+    Args:
+        state: The callback_context.state dictionary.
+
+    Returns:
+        Dictionary with state metrics:
+        - state_keys_count: Number of keys
+        - state_json_bytes: Size of serialized state
+        - state_sha256: Hash of canonical JSON
+        - state_token_estimate: Estimated tokens for full state
+        - state_token_estimate_persistable_only: Tokens excluding temp: keys
+    """
+    # Full state metrics
+    state_json = _canonical_json(dict(state))
+    state_bytes = len(state_json.encode("utf-8"))
+    state_hash = _compute_sha256(state_json)
+    state_tokens = _estimate_tokens(state_json)
+
+    # Persistable-only metrics (excluding temp: keys)
+    persistable_state = _filter_persistable_state(state)
+    persistable_json = _canonical_json(persistable_state)
+    persistable_tokens = _estimate_tokens(persistable_json)
+
+    return {
+        "state_keys_count": len(state),
+        "state_json_bytes": state_bytes,
+        "state_sha256": state_hash,
+        "state_token_estimate": state_tokens,
+        "state_token_estimate_persistable_only": persistable_tokens,
+    }
+
+
+def _compute_content_metrics(
+    content: Optional[types.Content],
+    max_preview_chars: int = 500,
+) -> dict[str, Any]:
+    """Compute metrics for a Content object (e.g., previous message).
+
+    Args:
+        content: The Content object to analyze.
+        max_preview_chars: Maximum characters for preview text.
+
+    Returns:
+        Dictionary with content metrics:
+        - role: The content role (user, model, etc.)
+        - token_estimate: Estimated tokens
+        - preview: Truncated text preview
+    """
+    if not content or not content.parts:
+        return {}
+
+    role = content.role or "unknown"
+
+    # Extract text from all parts
+    text_parts = []
+    for part in content.parts:
+        if part.text:
+            text_parts.append(part.text)
+        elif part.function_call:
+            text_parts.append(f"[function_call: {part.function_call.name}]")
+        elif part.function_response:
+            text_parts.append(f"[function_response: {part.function_response.name}]")
+
+    full_text = " ".join(text_parts)
+    token_estimate = _estimate_tokens(full_text)
+
+    # Create preview
+    preview = full_text[:max_preview_chars]
+    if len(full_text) > max_preview_chars:
+        preview += "..."
+
+    return {
+        "role": role,
+        "token_estimate": token_estimate,
+        "preview": preview,
+    }
+
+
+def _get_llm_call_index_key(agent_name: str) -> str:
+    """Get the temp: state key for tracking LLM call index per agent.
+
+    Args:
+        agent_name: The agent name.
+
+    Returns:
+        State key in format 'temp:telemetry:llm_call_index:{agent_name}'.
+    """
+    return f"temp:telemetry:llm_call_index:{agent_name}"
+
+
+def _build_request_snapshot(
+    llm_request: "LlmRequest",
+    callback_context: "CallbackContext",
+) -> dict[str, Any]:
+    """Build a full request snapshot for telemetry.
+
+    Captures the complete request structure that enters the LLM:
+    - System instruction
+    - Tool schema names
+    - Full message list with content
+
+    Args:
+        llm_request: The LlmRequest object.
+        callback_context: The callback context.
+
+    Returns:
+        Dictionary with the complete request snapshot.
+    """
+    from google.adk.agents.callback_context import CallbackContext
+    from google.adk.models.llm_request import LlmRequest
+
+    snapshot: dict[str, Any] = {
+        "agent_name": callback_context.agent_name,
+        "invocation_id": callback_context.invocation_id,
+        "model": llm_request.model,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # System instruction
+    if llm_request.config and llm_request.config.system_instruction:
+        snapshot["system_instruction"] = llm_request.config.system_instruction
+
+    # Tool names (not full schemas to keep size manageable)
+    if llm_request.tools_dict:
+        snapshot["tool_names"] = list(llm_request.tools_dict.keys())
+
+    # Full message list
+    if llm_request.contents:
+        messages = []
+        for content in llm_request.contents:
+            msg: dict[str, Any] = {"role": content.role}
+            parts_data = []
+            if content.parts:
+                for part in content.parts:
+                    part_data: dict[str, Any] = {}
+                    if part.text:
+                        part_data["text"] = part.text
+                    if part.function_call:
+                        part_data["function_call"] = {
+                            "name": part.function_call.name,
+                            "args": dict(part.function_call.args) if part.function_call.args else {},
+                        }
+                    if part.function_response:
+                        part_data["function_response"] = {
+                            "name": part.function_response.name,
+                            "response": part.function_response.response,
+                        }
+                    if part_data:
+                        parts_data.append(part_data)
+            msg["parts"] = parts_data
+            messages.append(msg)
+        snapshot["messages"] = messages
+
+    return snapshot
+
+
+def _save_request_snapshot(
+    snapshot: dict[str, Any],
+    session_id: str,
+    invocation_id: str,
+    agent_name: str,
+    llm_call_index: int,
+    artifacts_path: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Save request snapshot to UC Volumes and return pointer metadata.
+
+    Args:
+        snapshot: The request snapshot dictionary.
+        session_id: Session ID.
+        invocation_id: Invocation ID.
+        agent_name: Agent name.
+        llm_call_index: The LLM call index.
+        artifacts_path: Path to artifacts directory (default from env).
+
+    Returns:
+        Dictionary with snapshot pointer metadata:
+        - request_snapshot_path: Full path to saved snapshot
+        - request_snapshot_sha256: Hash of the snapshot
+        - request_snapshot_bytes: Size of the snapshot
+        Or None if saving is disabled or fails.
+    """
+    if artifacts_path is None:
+        artifacts_path = os.environ.get("ADK_ARTIFACTS_PATH")
+
+    if not artifacts_path:
+        # Snapshot saving is disabled
+        return None
+
+    try:
+        # Serialize snapshot
+        snapshot_json = _canonical_json(snapshot)
+        snapshot_bytes = len(snapshot_json.encode("utf-8"))
+        snapshot_hash = _compute_sha256(snapshot_json)
+
+        # Build filename with identifiers for easy lookup
+        safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+        filename = f"request_snapshot_{session_id}_{invocation_id}_{safe_agent}_{llm_call_index}.json"
+
+        # Use a telemetry subfolder to separate from other artifacts
+        telemetry_path = os.path.join(artifacts_path, "telemetry", "request_snapshots")
+        os.makedirs(telemetry_path, exist_ok=True)
+
+        full_path = os.path.join(telemetry_path, filename)
+
+        # Write the snapshot
+        with open(full_path, "w") as f:
+            f.write(snapshot_json)
+
+        logger.debug(f"Request snapshot saved: {full_path}")
+
+        return {
+            "request_snapshot_path": full_path,
+            "request_snapshot_sha256": snapshot_hash,
+            "request_snapshot_bytes": snapshot_bytes,
+        }
+
+    except Exception as e:
+        logger.warning(f"Failed to save request snapshot: {e}")
+        return None
+
+
+def _build_request_preview(
+    llm_request: "LlmRequest",
+    max_chars: int = 1000,
+) -> str:
+    """Build a small preview of the request for inline storage in telemetry.
+
+    Args:
+        llm_request: The LlmRequest object.
+        max_chars: Maximum characters for the preview.
+
+    Returns:
+        String preview of the request.
+    """
+    preview_parts = []
+
+    # Model
+    preview_parts.append(f"model={llm_request.model or 'default'}")
+
+    # System instruction preview
+    if llm_request.config and llm_request.config.system_instruction:
+        sys_instr = llm_request.config.system_instruction[:200]
+        if len(llm_request.config.system_instruction) > 200:
+            sys_instr += "..."
+        preview_parts.append(f"system={sys_instr}")
+
+    # Tool count
+    if llm_request.tools_dict:
+        preview_parts.append(f"tools={list(llm_request.tools_dict.keys())}")
+
+    # Message count and last message preview
+    if llm_request.contents:
+        msg_count = len(llm_request.contents)
+        preview_parts.append(f"messages={msg_count}")
+
+        # Last message preview
+        if llm_request.contents:
+            last = llm_request.contents[-1]
+            last_text = ""
+            if last.parts:
+                for part in last.parts:
+                    if part.text:
+                        last_text = part.text[:200]
+                        if len(part.text) > 200:
+                            last_text += "..."
+                        break
+            if last_text:
+                preview_parts.append(f"last_msg({last.role})={last_text}")
+
+    preview = " | ".join(preview_parts)
+    if len(preview) > max_chars:
+        preview = preview[:max_chars] + "..."
+
+    return preview
+
+
+def _build_response_snapshot(
+    llm_response: "LlmResponse",
+    callback_context: "CallbackContext",
+    llm_call_index: int,
+) -> dict[str, Any]:
+    """Build a full response snapshot for telemetry.
+
+    Captures the complete response structure from the LLM:
+    - Full content (all parts)
+    - Usage metadata
+    - Streaming indicators
+
+    Args:
+        llm_response: The LlmResponse object.
+        callback_context: The callback context.
+        llm_call_index: The LLM call index for this response.
+
+    Returns:
+        Dictionary with the complete response snapshot.
+    """
+    from google.adk.agents.callback_context import CallbackContext
+    from google.adk.models.llm_response import LlmResponse
+
+    snapshot: dict[str, Any] = {
+        "agent_name": callback_context.agent_name,
+        "invocation_id": callback_context.invocation_id,
+        "llm_call_index": llm_call_index,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Content
+    if llm_response.content and llm_response.content.parts:
+        content_parts = []
+        for part in llm_response.content.parts:
+            part_data: dict[str, Any] = {}
+            if part.text:
+                part_data["text"] = part.text
+            if part.function_call:
+                part_data["function_call"] = {
+                    "name": part.function_call.name,
+                    "args": dict(part.function_call.args) if part.function_call.args else {},
+                }
+            if part.function_response:
+                part_data["function_response"] = {
+                    "name": part.function_response.name,
+                    "response": part.function_response.response,
+                }
+            if part_data:
+                content_parts.append(part_data)
+        snapshot["content"] = {
+            "role": llm_response.content.role,
+            "parts": content_parts,
+        }
+
+    # Usage metadata
+    if llm_response.usage_metadata:
+        snapshot["usage_metadata"] = {
+            "prompt_token_count": llm_response.usage_metadata.prompt_token_count,
+            "candidates_token_count": llm_response.usage_metadata.candidates_token_count,
+        }
+        cached = getattr(llm_response.usage_metadata, "cached_content_token_count", None)
+        if cached is not None:
+            snapshot["usage_metadata"]["cached_content_token_count"] = cached
+
+    # Streaming indicators
+    snapshot["partial"] = llm_response.partial
+    snapshot["turn_complete"] = llm_response.turn_complete
+
+    # Error info if present
+    if llm_response.error_code:
+        snapshot["error_code"] = llm_response.error_code
+        snapshot["error_message"] = llm_response.error_message
+
+    return snapshot
+
+
+def _save_response_snapshot(
+    snapshot: dict[str, Any],
+    session_id: str,
+    invocation_id: str,
+    agent_name: str,
+    llm_call_index: int,
+    artifacts_path: Optional[str] = None,
+    size_threshold: int = 2000,
+) -> Optional[dict[str, Any]]:
+    """Save response snapshot to UC Volumes and return pointer metadata.
+
+    Only saves if the response exceeds the size threshold (for large responses).
+
+    Args:
+        snapshot: The response snapshot dictionary.
+        session_id: Session ID.
+        invocation_id: Invocation ID.
+        agent_name: Agent name.
+        llm_call_index: The LLM call index.
+        artifacts_path: Path to artifacts directory (default from env).
+        size_threshold: Minimum bytes to trigger snapshot save (default 2000).
+
+    Returns:
+        Dictionary with snapshot pointer metadata:
+        - response_snapshot_path: Full path to saved snapshot
+        - response_snapshot_sha256: Hash of the snapshot
+        - response_snapshot_bytes: Size of the snapshot
+        Or None if saving is disabled, fails, or response is small.
+    """
+    if artifacts_path is None:
+        artifacts_path = os.environ.get("ADK_ARTIFACTS_PATH")
+
+    if not artifacts_path:
+        # Snapshot saving is disabled
+        return None
+
+    try:
+        # Serialize snapshot
+        snapshot_json = _canonical_json(snapshot)
+        snapshot_bytes = len(snapshot_json.encode("utf-8"))
+
+        # Only save large responses (small ones are captured in response_preview)
+        if snapshot_bytes < size_threshold:
+            return None
+
+        snapshot_hash = _compute_sha256(snapshot_json)
+
+        # Build filename with identifiers for easy lookup
+        safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
+        filename = f"response_snapshot_{session_id}_{invocation_id}_{safe_agent}_{llm_call_index}.json"
+
+        # Use a telemetry subfolder to separate from other artifacts
+        telemetry_path = os.path.join(artifacts_path, "telemetry", "response_snapshots")
+        os.makedirs(telemetry_path, exist_ok=True)
+
+        full_path = os.path.join(telemetry_path, filename)
+
+        # Write the snapshot
+        with open(full_path, "w") as f:
+            f.write(snapshot_json)
+
+        logger.debug(f"Response snapshot saved: {full_path}")
+
+        return {
+            "response_snapshot_path": full_path,
+            "response_snapshot_sha256": snapshot_hash,
+            "response_snapshot_bytes": snapshot_bytes,
+        }
+
+    except Exception as e:
+        logger.warning(f"Failed to save response snapshot: {e}")
+        return None
+
 
 # Configuration from environment
 ADK_DELTA_CATALOG = os.environ.get("ADK_DELTA_CATALOG", "silo_dev_rs")
@@ -613,12 +1202,49 @@ class UcDeltaTelemetryPlugin(BasePlugin):
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> Optional[LlmResponse]:
-        """Log LLM request before sending to model."""
+        """Log LLM request before sending to model.
+
+        Captures invocation-context measurement metrics:
+        - LLM call index (monotonic per invocation_id + agent_name)
+        - State snapshot metrics (bytes, hash, token estimates)
+        - Previous message metrics (role, token estimate, preview)
+        """
         model_name = llm_request.model or "default"
+        agent_name = callback_context.agent_name
         self._log("LLM REQUEST")
         self._log(f"   Model: {model_name}")
-        self._log(f"   Agent: {callback_context.agent_name}")
+        self._log(f"   Agent: {agent_name}")
 
+        # --- Phase 1: LLM call index tracking ---
+        # Increment and store llm_call_index in temp: state
+        index_key = _get_llm_call_index_key(agent_name)
+        current_index = callback_context.state.get(index_key, 0)
+        llm_call_index = current_index + 1
+        callback_context.state[index_key] = llm_call_index
+        self._log(f"   LLM Call Index: {llm_call_index}")
+
+        # --- Phase 1: State snapshot metrics ---
+        state_metrics = _compute_state_metrics(_safe_state_to_dict(callback_context.state))
+        self._log(f"   State Keys: {state_metrics['state_keys_count']}")
+        self._log(f"   State Bytes: {state_metrics['state_json_bytes']}")
+        self._log(f"   State Token Estimate: {state_metrics['state_token_estimate']}")
+        self._log(
+            f"   State Token Estimate (persistable): {state_metrics['state_token_estimate_persistable_only']}"
+        )
+
+        # --- Phase 2: Previous message metrics ---
+        prev_message_metrics: dict[str, Any] = {}
+        if llm_request.contents and len(llm_request.contents) > 0:
+            # Get the last message in the request
+            last_content = llm_request.contents[-1]
+            prev_message_metrics = _compute_content_metrics(last_content)
+            if prev_message_metrics:
+                self._log(f"   Prev Message Role: {prev_message_metrics.get('role')}")
+                self._log(
+                    f"   Prev Message Token Estimate: {prev_message_metrics.get('token_estimate')}"
+                )
+
+        # --- Existing telemetry ---
         sys_instruction = None
         if llm_request.config and llm_request.config.system_instruction:
             sys_instruction = llm_request.config.system_instruction[:200]
@@ -631,25 +1257,95 @@ class UcDeltaTelemetryPlugin(BasePlugin):
             tool_names = list(llm_request.tools_dict.keys())
             self._log(f"   Available Tools: {tool_names}")
 
+        # --- Phase 3: Request snapshot (optional, if ADK_ARTIFACTS_PATH is set) ---
+        request_preview = _build_request_preview(llm_request)
+        request_snapshot_metadata: dict[str, Any] = {}
+
+        # Get session_id for snapshot filename
+        session_id = None
+        if hasattr(callback_context, "_invocation_context"):
+            ic = callback_context._invocation_context
+            session_id = ic.session.id if ic.session else None
+
+        if session_id and os.environ.get("ADK_ARTIFACTS_PATH"):
+            # Build and save the full request snapshot
+            snapshot = _build_request_snapshot(llm_request, callback_context)
+            snapshot_result = _save_request_snapshot(
+                snapshot=snapshot,
+                session_id=session_id,
+                invocation_id=callback_context.invocation_id,
+                agent_name=agent_name,
+                llm_call_index=llm_call_index,
+            )
+            if snapshot_result:
+                request_snapshot_metadata = snapshot_result
+                self._log(f"   Request Snapshot: {snapshot_result.get('request_snapshot_path')}")
+
+        # Build enriched payload with all metrics
+        payload: dict[str, Any] = {
+            # LLM call tracking
+            "llm_call": {
+                "llm_call_index": llm_call_index,
+                "model_name": model_name,
+            },
+            # State snapshot metrics
+            "state_snapshot": state_metrics,
+            # Token estimation metadata (method: tiktoken or heuristic)
+            "token_estimation": _get_token_estimation_metadata(),
+            # NEW: request_last_message - clarified semantics (last message in LlmRequest.contents)
+            "request_last_message": {
+                "role": prev_message_metrics.get("role"),
+                "token_estimate": prev_message_metrics.get("token_estimate"),
+                "preview": prev_message_metrics.get("preview"),
+            } if prev_message_metrics else {},
+            # DEPRECATED: prev_message - kept for backward compatibility
+            # Will be removed in a future release. Use request_last_message instead.
+            "prev_message": {
+                "prev_message_role": prev_message_metrics.get("role"),
+                "prev_message_token_estimate": prev_message_metrics.get("token_estimate"),
+                "prev_message_preview": prev_message_metrics.get("preview"),
+            } if prev_message_metrics else {},
+            # Phase 3: Request sampling
+            "request_sampling": {
+                "request_preview": request_preview,
+                **request_snapshot_metadata,
+            },
+            # Original telemetry fields
+            "system_instruction_preview": sys_instruction,
+            "available_tools": tool_names,
+        }
+
         self._persist(
             callback_name="before_model_callback",
             callback_context=callback_context,
             model_name=model_name,
-            payload={
-                "system_instruction_preview": sys_instruction,
-                "available_tools": tool_names,
-            },
+            payload=payload,
         )
         return None
 
     async def after_model_callback(
         self, *, callback_context: CallbackContext, llm_response: LlmResponse
     ) -> Optional[LlmResponse]:
-        """Log LLM response after receiving from model."""
-        self._log("LLM RESPONSE")
-        self._log(f"   Agent: {callback_context.agent_name}")
+        """Log LLM response after receiving from model.
 
-        payload: dict[str, Any] = {}
+        Includes the llm_call_index for pairing with before_model_callback
+        and authoritative usage metadata from the model.
+        """
+        agent_name = callback_context.agent_name
+        self._log("LLM RESPONSE")
+        self._log(f"   Agent: {agent_name}")
+
+        # --- Retrieve llm_call_index from temp: state ---
+        index_key = _get_llm_call_index_key(agent_name)
+        llm_call_index = callback_context.state.get(index_key, 0)
+        self._log(f"   LLM Call Index: {llm_call_index}")
+
+        payload: dict[str, Any] = {
+            # LLM call tracking (for pairing with before_model_callback)
+            "llm_call": {
+                "llm_call_index": llm_call_index,
+            },
+        }
 
         if llm_response.error_code:
             self._log(f"   ERROR - Code: {llm_response.error_code}")
@@ -667,15 +1363,69 @@ class UcDeltaTelemetryPlugin(BasePlugin):
             payload["partial"] = llm_response.partial
             payload["turn_complete"] = llm_response.turn_complete
 
+        # --- Authoritative usage metadata from the model ---
         if llm_response.usage_metadata:
-            self._log(
-                f"   Token Usage - Input: {llm_response.usage_metadata.prompt_token_count}, "
-                f"Output: {llm_response.usage_metadata.candidates_token_count}"
+            prompt_tokens = llm_response.usage_metadata.prompt_token_count
+            candidates_tokens = llm_response.usage_metadata.candidates_token_count
+            # Check for cached_content_token_count if available
+            cached_tokens = getattr(
+                llm_response.usage_metadata, "cached_content_token_count", None
             )
+
+            self._log(
+                f"   Token Usage - Input: {prompt_tokens}, Output: {candidates_tokens}"
+            )
+            if cached_tokens is not None:
+                self._log(f"   Cached Content Tokens: {cached_tokens}")
+
             payload["usage_metadata"] = {
-                "prompt_token_count": llm_response.usage_metadata.prompt_token_count,
-                "candidates_token_count": llm_response.usage_metadata.candidates_token_count,
+                "prompt_token_count": prompt_tokens,
+                "candidates_token_count": candidates_tokens,
             }
+            if cached_tokens is not None:
+                payload["usage_metadata"]["cached_content_token_count"] = cached_tokens
+
+        # --- Response sampling (preview for easy SQL browsing + optional full snapshot) ---
+        response_preview = ""
+        if llm_response.content and llm_response.content.parts:
+            preview_parts = []
+            for part in llm_response.content.parts:
+                if part.text:
+                    text = part.text[:500]
+                    if len(part.text) > 500:
+                        text += "..."
+                    preview_parts.append(text)
+                elif part.function_call:
+                    preview_parts.append(f"[function_call: {part.function_call.name}]")
+            response_preview = " | ".join(preview_parts)
+
+        # --- Response snapshot (optional, for large responses when ADK_ARTIFACTS_PATH is set) ---
+        response_snapshot_metadata: dict[str, Any] = {}
+
+        # Get session_id for snapshot filename
+        session_id = None
+        if hasattr(callback_context, "_invocation_context"):
+            ic = callback_context._invocation_context
+            session_id = ic.session.id if ic.session else None
+
+        if session_id and os.environ.get("ADK_ARTIFACTS_PATH"):
+            # Build and save the full response snapshot (only if large enough)
+            snapshot = _build_response_snapshot(llm_response, callback_context, llm_call_index)
+            snapshot_result = _save_response_snapshot(
+                snapshot=snapshot,
+                session_id=session_id,
+                invocation_id=callback_context.invocation_id,
+                agent_name=agent_name,
+                llm_call_index=llm_call_index,
+            )
+            if snapshot_result:
+                response_snapshot_metadata = snapshot_result
+                self._log(f"   Response Snapshot: {snapshot_result.get('response_snapshot_path')}")
+
+        payload["response_sampling"] = {
+            "response_preview": response_preview,
+            **response_snapshot_metadata,
+        }
 
         self._persist(
             callback_name="after_model_callback",
@@ -736,17 +1486,40 @@ class UcDeltaTelemetryPlugin(BasePlugin):
         llm_request: LlmRequest,
         error: Exception,
     ) -> Optional[LlmResponse]:
-        """Log LLM error."""
+        """Log LLM error.
+
+        Includes llm_call_index for pairing with before_model_callback rows,
+        and a request preview for diagnosability.
+        """
         model_name = llm_request.model or "default"
+        agent_name = callback_context.agent_name
         self._log("LLM ERROR")
-        self._log(f"   Agent: {callback_context.agent_name}")
+        self._log(f"   Agent: {agent_name}")
         self._log(f"   Error: {error}")
+
+        # --- Retrieve llm_call_index from temp: state for pairing ---
+        index_key = _get_llm_call_index_key(agent_name)
+        llm_call_index = callback_context.state.get(index_key, 0)
+        self._log(f"   LLM Call Index: {llm_call_index}")
+
+        # --- Build request preview for diagnosability ---
+        request_preview = _build_request_preview(llm_request, max_chars=500)
 
         self._persist(
             callback_name="on_model_error_callback",
             callback_context=callback_context,
             model_name=model_name,
-            payload={"error": str(error), "error_type": type(error).__name__},
+            payload={
+                # LLM call tracking (for pairing with before_model_callback)
+                "llm_call": {
+                    "llm_call_index": llm_call_index,
+                },
+                # Error details
+                "error": str(error),
+                "error_type": type(error).__name__,
+                # Request preview for diagnosability
+                "request_preview": request_preview,
+            },
         )
         return None
 

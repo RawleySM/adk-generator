@@ -3,14 +3,19 @@
 This plugin provides a before_agent_callback for the results_processor agent
 that injects execution context from the artifact registry.
 
-When results_processor_agent is about to run, this plugin:
-1. Reads temp:rlm:artifact_id from state (with fallback to legacy rlm:*)
-2. Loads the artifact metadata from the registry
-3. Loads stdout/stderr from result.json or state
-4. Returns a types.Content message injecting this context
+When results_processor_agent is about to run (before_agent_callback):
+1. Verifies temp:rlm:stage == "executed" (stage gating)
+2. Reads temp:rlm:artifact_id from state (with fallback to legacy rlm:*)
+3. Loads the artifact metadata from the registry
+4. Loads stdout/stderr from result.json or state
+5. Returns a types.Content message injecting this context
+
+When results_processor_agent completes (after_agent_callback):
+6. Updates temp:rlm:stage to "processed" (completes stage state machine)
 
 State key design:
 - Uses dual-read pattern: temp:rlm:* first, fallback to rlm:* for migration
+- Stage gating: only injects when temp:rlm:stage == "executed"
 - See plans/refactor_key_glue.md for the migration plan
 
 This enables results_processor_agent to analyze execution output based on
@@ -46,6 +51,11 @@ STATE_RESULT_JSON_PATH = "temp:rlm:result_json_path"
 STATE_EXECUTION_STDOUT = "temp:rlm:execution_stdout"
 STATE_EXECUTION_STDERR = "temp:rlm:execution_stderr"
 STATE_STDOUT_TRUNCATED = "temp:rlm:stdout_truncated"
+
+# Stage tracking keys - invocation-scoped (replaces pruning plugin for correctness)
+# Stage progression: "delegated" -> "executed" -> "processed"
+STATE_STAGE = "temp:rlm:stage"
+STATE_ACTIVE_ARTIFACT_ID = "temp:rlm:active_artifact_id"
 
 # Session-scoped keys
 STATE_ITERATION = "rlm:iteration"
@@ -229,6 +239,29 @@ class RlmContextInjectionPlugin(BasePlugin):
                 )
             return None
 
+        # Stage gating: only inject if stage is "executed"
+        # This prevents injecting stale execution results from previous iterations
+        current_stage = callback_context.state.get(STATE_STAGE)
+        if current_stage != "executed":
+            self.skip_count += 1
+            if self._enable_logging:
+                logger.debug(
+                    f"[{self.name}] Skipping injection for {agent_name} - "
+                    f"stage is '{current_stage}', not 'executed'"
+                )
+            return None
+
+        # Verify artifact matches the active artifact (if set)
+        active_artifact_id = callback_context.state.get(STATE_ACTIVE_ARTIFACT_ID)
+        if active_artifact_id and active_artifact_id != artifact_id:
+            self.skip_count += 1
+            if self._enable_logging:
+                logger.debug(
+                    f"[{self.name}] Skipping injection for {agent_name} - "
+                    f"active_artifact_id mismatch"
+                )
+            return None
+
         # Get the sublm_instruction from state (dual-read)
         sublm_instruction = get_rlm_state(callback_context.state, "sublm_instruction")
 
@@ -315,6 +348,41 @@ class RlmContextInjectionPlugin(BasePlugin):
             role="user",
             parts=[types.Part.from_text(text=content_text)],
         )
+
+    async def after_agent_callback(
+        self,
+        *,
+        callback_context: CallbackContext,
+        **kwargs,  # Accept additional ADK-provided arguments
+    ) -> Optional[types.Content]:
+        """Update stage to "processed" after results_processor completes.
+
+        This completes the stage state machine: delegated -> executed -> processed.
+        The stage update prevents stale state from triggering re-processing in
+        later loop iterations.
+
+        Args:
+            callback_context: The callback context with agent and state info.
+            **kwargs: Additional ADK-provided keyword arguments.
+
+        Returns:
+            None - this callback only updates state, doesn't inject content.
+        """
+        # Only run for the target agent
+        agent_name = callback_context.agent_name
+        if agent_name != self._target_agent_name:
+            return None
+
+        # Only update stage if we're in "executed" state (meaning we actually processed)
+        current_stage = callback_context.state.get(STATE_STAGE)
+        if current_stage == "executed":
+            callback_context.state[STATE_STAGE] = "processed"
+            if self._enable_logging:
+                logger.info(
+                    f"[{self.name}] Stage updated to 'processed' after {agent_name}"
+                )
+
+        return None
 
     def get_stats(self) -> dict[str, Any]:
         """Get plugin statistics.

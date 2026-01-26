@@ -55,6 +55,8 @@ TASK_LEVEL_1 = TestTask(
     description="""
 Perform a minimal probe that validates UC and repo access before deeper tasks.
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 **Deliverables:**
 - Run a simple UC query using delegate_code_results to confirm access.
 - Use metadata_keyword_search to discover 3 random tables and validate schema discovery.
@@ -88,6 +90,8 @@ TASK_LEVEL_2 = TestTask(
 Use delegate_code_results to sample 10 Jira tasks from
 silo_dev_rs.task.jira_raw_data. Select a handful of fields that summarize each task.
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 **Deliverables:**
 - A small table of 10 Jira tasks (key + summary + description snippet).
 - For 3 tasks, infer likely data domains and code areas to explore next.
@@ -119,6 +123,8 @@ Use metadata_keyword_search tool to discover tables that indicate
 workflows, jobs, tasks, tickets, or audits. Use columnname pattern searches
 like 'workflow', 'task', 'jira', 'audit', 'status', 'phase', 'owner'.
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 **Deliverables:**
 1. A curated list of 8-12 tables grouped by domain (workflow, task, audit, etc.)
 2. For each table, list key columns (3-5 per table) inferred from metadata
@@ -148,6 +154,8 @@ Use repo_filename_search and get_repo_file to locate code related to
 workflows, agents, tasks, or Jira ingestion across any available repos.
 Then connect those code paths to relevant UC tables via metadata_keyword_search.
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 **Deliverables:**
 1. 5-8 code files that appear relevant (with brief rationale)
 2. For each file, list 2-3 UC tables that look related
@@ -174,6 +182,8 @@ TASK_LEVEL_5 = TestTask(
     description="""
 Pick 1 Jira task from silo_dev_rs.task.jira_raw_data that has vague wording.
 Turn it into a concrete exploration plan spanning code, UC tables, and views.
+
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
 
 **Deliverables:**
 1. Jira task summary + missing details (assumptions list)
@@ -204,6 +214,8 @@ Start from metadata_keyword_search to discover workflow/task-related tables.
 Then validate the top 5 candidates by sampling rows (limit 5) using
 delegate_code_results.
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 **Deliverables:**
 1. A ranked list of 10 candidate tables with reasons
 2. Sample rows from the top 5 tables
@@ -230,6 +242,8 @@ TASK_LEVEL_7 = TestTask(
     description="""
 Select a Jira task that references a workflow or automation outcome. Trace
 the likely lineage from Jira -> code paths -> UC tables/views.
+
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
 
 **Deliverables:**
 1. Jira task summary + assumed system context
@@ -262,6 +276,8 @@ Using 2-3 Jira tasks with vague descriptions, define a proposed data application
 spec. The work must be exploratory: probe codebases, inspect UC metadata, and
 sample tables. The objective is to produce a spec and a plan, not to build.
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 **Deliverables:**
 1. A data application specification (inputs, outputs, flows)
 2. A table/view inventory that supports the spec
@@ -291,6 +307,8 @@ TASK_LEVEL_9 = TestTask(
 Perform a deep exploration across any available repos and UC schemas to create
 a coverage map for a hypothetical data application. Assume the Jira story is
 vague and hints at "workflow automation" and "task intelligence".
+
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
 
 **Investigation Areas:**
 
@@ -328,6 +346,8 @@ Build a comprehensive exploration report for a complex data application,
 based on vague Jira tasks, deep UC metadata exploration, and multi-repo code
 probing. This task MUST produce artifacts saved under:
 /Volumes/silo_dev_rs/repos/test_dev/
+
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
 
 **Deliverables:**
 
@@ -385,6 +405,8 @@ To make sure that each report testing confluence page has the following informat
 * Remote Access, database and table name
 * How its written to that table (i.e. created-once, update/insert, append-only, other?) 
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 **Deliverables:**
 1. Identify the relevant DBT models and their corresponding Unity Catalog tables.
 2. Determine the write mode for each table (e.g., by inspecting code or table history).
@@ -421,6 +443,8 @@ Example (default values):
 
 This could be explained as to only include vendors with more than $5000 in spend, is within the top 95% of vendors spend, and is not marked as a person. 
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 Pre Requirements: 
 
 * DBT Unsubmitted Vendors view (silo_{code}.sm.export_mvm__unsubmitted_vendors?)
@@ -445,7 +469,7 @@ Process Requirements:
     story_points=8.0,
     expected_tables=[
         "silo_dev_rs.metadata.columnnames", 
-        "main.mvm.customer_jobs"
+        "silo_dev_rs.test.customer_jobs"
     ],
     delegation_benefit="Summarize script logic and table dependencies."
 )
@@ -466,6 +490,8 @@ TASK_LEVEL_13 = TestTask(
 * Scraper logs into Qualys using {{username=spend6ap}} and {{password='redacted'}}.
 * Scraper navigates to "VMDR > Reports" and retrieves the latest report.
 * Report is downloaded and securely stored in Azure Blob Storage.
+
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
 
 **Deliverables:**
 1. Research existing scraper patterns in the codebase.
@@ -504,6 +530,8 @@ Probable next steps:
 * Test integration of TF-IDF into cosine similarity (i.e. penalize common occurring words)
 * Create TI-IDF index based on Master Vendor dataset. Set refresh interval
 * Create embedding hash map table( vendor_name, vector_array) to reduce runtime computation
+
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
 
 **Deliverables:**
 1. A plan for the POC notebook, including necessary libraries and data sources.
@@ -548,6 +576,8 @@ Success Criteria:
 * The dropdown selection should be based on API/Data not the file
 * Tag updates should persist to the master vendor
 
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
 **Deliverables:**
 1. Detailed specification for the Streamlit app components and data flow.
 2. Inventory of necessary APIs or UC tables for fetching tags and updating vendors.
@@ -561,6 +591,47 @@ Success Criteria:
     story_points=8.0,
     expected_tables=["silo_dev_rs.metadata.columnnames"],
     delegation_benefit="Synthesize full app requirements and data flow."
+)
+
+
+# =============================================================================
+# LEVEL 16 - Confluence Documentation & Project Discovery
+# =============================================================================
+TASK_LEVEL_16 = TestTask(
+    difficulty=16,
+    issue_key="EVAL-016",
+    summary="Spendmend Codebase & Confluence Documentation Discovery",
+    description="""
+Explore the Spendmend codebase and Unity Catalog metadata to identify documentation sources, particularly those linked to Confluence, and map active projects.
+
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
+**Steps:**
+1. Explore the codebase using file listing tools to identify documentation structures.
+2. Query `silo_dev_rs.metadata.columnnames` (and other metadata) to find links to Confluence or documentation.
+3. Identify active projects, likely represented by repository folders.
+4. Detect documentation filename patterns within these projects.
+5. Attempt to link identified projects/repos to active entries in the catalog.
+
+**Deliverables:**
+- A Markdown report saved to `/Volumes/silo_dev_rs/repos/test_dev/project_discovery_report.md` containing:
+    - Evidence of Confluence links found in code or metadata.
+    - List of identified active projects/folders.
+    - Observed documentation patterns (e.g., README.md, docs/ folders).
+    - Mapping of projects to Catalog assets.
+
+**Constraints:**
+- Perform at least 5 turns of exploration loop before finalizing.
+- Write the final report to the specified volume path.
+
+**Acceptance Criteria:**
+- Report exists in the volume.
+- Report contains specific examples of Confluence links and project mappings.
+""",
+    priority="High",
+    story_points=8.0,
+    expected_tables=["silo_dev_rs.metadata.columnnames"],
+    delegation_benefit="Summarize discovery findings across file systems and catalogs."
 )
 
 
@@ -583,6 +654,7 @@ TASKS = {
     13: TASK_LEVEL_13,
     14: TASK_LEVEL_14,
     15: TASK_LEVEL_15,
+    16: TASK_LEVEL_16,
 }
 
 

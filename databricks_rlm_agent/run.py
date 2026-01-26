@@ -131,8 +131,7 @@ async def create_runner(
         linting_plugin,             # 3. Validate Python syntax before execution
         logging_plugin,             # 4. Telemetry and logging (UC Delta or stdout)
         global_instruction_plugin,  # 5. Inject global instructions
-        context_injection_plugin,   # 6. Inject execution context to results_processor
-        context_pruning_plugin,     # 7. Clear state after results_processor completes
+        context_injection_plugin,   # 6. Inject execution context to results_processor (+ stage tracking)
     )
 
     # Initialize Delta session service
@@ -155,8 +154,7 @@ async def create_runner(
     #   3. Linting - Validate Python syntax before execution
     #   4. Logging/Telemetry - Record events
     #   5. Global Instructions - Inject system prompts
-    #   6. Context Injection - Inject execution results for results_processor
-    #   7. Context Pruning - Clear state after results_processor
+    #   6. Context Injection - Inject execution results for results_processor (+ stage tracking)
     runner = Runner(
         agent=root_agent,
         app_name=APP_NAME,
@@ -169,7 +167,6 @@ async def create_runner(
             logging_plugin,
             global_instruction_plugin,
             context_injection_plugin,
-            context_pruning_plugin,
         ],
     )
 
@@ -219,8 +216,10 @@ async def run_conversation(
     # 2. temp:rlm:* keys auto-discard after invocation, so cleanup is unnecessary
     # 3. Legacy rlm:* keys will be phased out; accepting minor stale-flag risk during migration
     #
-    # If stale escalation flags cause issues, the proper fix is to ensure the pruning
-    # plugin runs even after fatal errors, not to inject fake user messages.
+    # Stale state is now prevented by stage tracking (temp:rlm:stage state machine):
+    #   - delegate_code_results sets stage="delegated"
+    #   - JobBuilderAgent only runs when stage="delegated", then sets stage="executed"
+    #   - RlmContextInjectionPlugin only injects when stage="executed", then sets stage="processed"
 
     async def _iterate_with_event_timeout():
         """Iterate over events with per-event timeout watchdog."""

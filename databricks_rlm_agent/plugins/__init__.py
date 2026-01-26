@@ -10,7 +10,7 @@ RLM Workflow Plugins:
 - FormattingCheckPlugin: Validates delegation blob format
 - CodeLintingPlugin: Validates Python syntax before execution
 - RlmContextInjectionPlugin: Injects execution results into results_processor_agent
-- RlmContextPruningPlugin: Clears state after results_processor_agent completes
+  (also handles stage tracking via before/after callbacks)
 """
 
 from .uc_delta_telemetry_plugin import UcDeltaTelemetryPlugin
@@ -22,7 +22,6 @@ from .uc_tool_execution_safety_plugin import (
 from .formatting_check_plugin import FormattingCheckPlugin
 from .code_linting_plugin import CodeLintingPlugin
 from .rlm_context_injection_plugin import RlmContextInjectionPlugin
-from .rlm_context_pruning_plugin import RlmContextPruningPlugin
 
 __all__ = [
     # Core plugins
@@ -34,5 +33,4 @@ __all__ = [
     "FormattingCheckPlugin",
     "CodeLintingPlugin",
     "RlmContextInjectionPlugin",
-    "RlmContextPruningPlugin",
 ]

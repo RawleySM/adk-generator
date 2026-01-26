@@ -239,15 +239,24 @@ You have access to powerful search tools that should be your starting point when
 
 3. `get_repo_file(filepaths, repo_name, branch="main")`:
    - Use this after `repo_filename_search` to download the specific file(s) you identified.
-   - Pass the `filepath` values from search results directly (dot-separated format is converted automatically).
+   - Prefer passing `repo_uc_filepath` values from search results directly (single-string `<repo_name>.<uc_filepath>`).
+   - `get_repo_file` can infer the repo from that unified string; `repo_name` becomes optional in that case.
    - Files are saved preserving directory structure: `/Volumes/silo_dev_rs/repos/git_downloads/<repo_name>/<path>/<filename>`.
    - Binary files (images, archives) are handled correctly. Text files are decoded as UTF-8.
    - Reminder: when the downloaded file is **text-heavy** (large `.py`, `.sql`, `.md`, configs, etc.), delegate the review/summarization to `delegate_code_results` to avoid bloating context and to extract only the relevant sections.
 """
 
 
+# State templating section for results summary from prior iterations
+# Uses ADK instruction templating: {state_key?} is optional (no error if missing)
+RESULTS_SUMMARY_SECTION = """
+## Prior Results Context
+{rlm:last_results_summary?}
+"""
+
 # Alias for backwards compatibility - ROOT_AGENT_INSTRUCTION includes domain extension
-ROOT_AGENT_INSTRUCTION = RLM_SYSTEM_PROMPT + "\n" + HEALTHCARE_VENDOR_EXTENSION
+# and state templating for prior results
+ROOT_AGENT_INSTRUCTION = RLM_SYSTEM_PROMPT + "\n" + HEALTHCARE_VENDOR_EXTENSION + RESULTS_SUMMARY_SECTION
 
 
 def build_rlm_system_prompt(

@@ -13,10 +13,12 @@ The JobBuilderAgent:
 6. Parses stdout between RLM markers
 7. Updates the artifact registry with results
 8. Sets state keys for results_processor_agent (temp:rlm:* invocation-scoped)
+9. Updates temp:rlm:stage from "delegated" to "executed"
 
 State key design:
 - Reads from temp:rlm:* with fallback to rlm:* (dual-read for migration)
 - Writes to temp:rlm:* (invocation-scoped, auto-discarded after invocation)
+- Stage gating: only executes when temp:rlm:stage == "delegated"
 - See plans/refactor_key_glue.md for the migration plan
 
 This design provides:
@@ -48,6 +50,11 @@ STATE_ARTIFACT_ID = "temp:rlm:artifact_id"
 STATE_SUBLM_INSTRUCTION = "temp:rlm:sublm_instruction"
 STATE_HAS_AGENT_CODE = "temp:rlm:has_agent_code"
 STATE_CODE_ARTIFACT_KEY = "temp:rlm:code_artifact_key"
+
+# Stage tracking keys - invocation-scoped (replaces pruning plugin for correctness)
+# Stage progression: "delegated" -> "executed" -> "processed"
+STATE_STAGE = "temp:rlm:stage"
+STATE_ACTIVE_ARTIFACT_ID = "temp:rlm:active_artifact_id"
 
 # Execution result keys (written by this agent, read by results_processor)
 STATE_EXECUTION_STDOUT = "temp:rlm:execution_stdout"
@@ -164,6 +171,35 @@ class JobBuilderAgent(BaseAgent):
             yield self._create_text_event(
                 ctx,
                 "No artifact with code to execute - skipping job submission.",
+                is_final=True,
+                state_delta=state_delta,
+            )
+            return
+
+        # Stage gating: only proceed if stage is "delegated" and artifact matches
+        # This prevents stale state from triggering re-execution in later loop iterations
+        current_stage = ctx.session.state.get(STATE_STAGE)
+        active_artifact_id = ctx.session.state.get(STATE_ACTIVE_ARTIFACT_ID)
+
+        if current_stage != "delegated":
+            logger.debug(
+                f"[JOB_BUILDER] Stage gating: current_stage={current_stage!r} != 'delegated', skipping"
+            )
+            yield self._create_text_event(
+                ctx,
+                f"Stage is '{current_stage}', not 'delegated' - skipping job submission.",
+                is_final=True,
+                state_delta=state_delta,
+            )
+            return
+
+        if active_artifact_id and active_artifact_id != artifact_id:
+            logger.debug(
+                f"[JOB_BUILDER] Stage gating: active_artifact_id={active_artifact_id!r} != artifact_id={artifact_id!r}, skipping"
+            )
+            yield self._create_text_event(
+                ctx,
+                f"Active artifact mismatch - skipping job submission.",
                 is_final=True,
                 state_delta=state_delta,
             )
@@ -329,6 +365,9 @@ class JobBuilderAgent(BaseAgent):
         set_state(STATE_RESULT_JSON_PATH, result_json_path)
         set_state(STATE_STDOUT_TRUNCATED, len(final_stdout) > len(stdout_preview))
         set_state(STATE_STDERR_TRUNCATED, len(stderr) > len(stderr_preview))
+
+        # Update stage to "executed" - enables results_processor to run
+        set_state(STATE_STAGE, "executed")
 
         # Step 9: Update artifact registry
         self._update_artifact_registry(
@@ -752,11 +791,14 @@ class JobBuilderAgent(BaseAgent):
     ) -> None:
         """Update the artifact registry with execution results.
 
+        Also marks the artifact as consumed when execution succeeds. This replaces
+        the artifact consumed marking that was previously done by RlmContextPruningPlugin.
+
         Args:
             artifact_id: The artifact identifier.
             stdout: Captured standard output.
             stderr: Captured standard error.
-            status: Execution status.
+            status: Execution status ("completed" or "failed").
             result_json_path: Path to the result.json file in UC Volumes.
         """
         try:
@@ -779,6 +821,15 @@ class JobBuilderAgent(BaseAgent):
                 metadata=metadata,
             )
             logger.info(f"[JOB_BUILDER] Updated artifact registry: {artifact_id}")
+
+            # Mark artifact as consumed on successful execution
+            # This replaces the responsibility from RlmContextPruningPlugin
+            if status == "completed":
+                try:
+                    registry.mark_consumed(artifact_id)
+                    logger.info(f"[JOB_BUILDER] Marked artifact {artifact_id} as consumed")
+                except Exception as e:
+                    logger.warning(f"[JOB_BUILDER] Could not mark artifact as consumed: {e}")
 
         except ImportError:
             logger.debug("[JOB_BUILDER] Spark not available - skipping registry update")

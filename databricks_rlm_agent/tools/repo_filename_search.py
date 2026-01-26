@@ -47,6 +47,9 @@ def repo_filename_search(
     - repo_name (string): Repository name (e.g., 'SDS-Kofax', 'sm-data-platform')
     - filename (string): File name (e.g., 'etl_pipeline.py', 'schema.sql')
     - filepath (string): Full path within repo (e.g., 'src/etl/etl_pipeline.py')
+    - uc_filepath (string): File path in "UC dotted" form (e.g., 'src.etl.etl_pipeline.py')
+    - repo_uc_filepath (string): Unified repo+path key: '<repo_name>.<uc_filepath>'
+    - raw_github_url (string): READY-TO-USE download URL for get_repo_file (PREFERRED)
     - filetype (string): Extension (e.g., 'py', 'sql', 'yml', 'json')
     - filesize (bigint): Size in bytes
     - last_modified_by (string): Last committer
@@ -54,11 +57,14 @@ def repo_filename_search(
     - dataTables (array<string>): UC Delta table paths found in the file
 
     Sample row:
-      repo_name: 'SDS-Kofax'
-      filename: 'Sds.Kofax.BaseLibrary.sln'
-      filepath: 'Base Library.Sds.Kofax.BaseLibrary.Sds.Kofax.BaseLibrary.sln'
-      filetype: 'sln'
-      filesize: 1337
+      repo_name: 'Master-Vendor-Alignment'
+      filename: 'README.md'
+      filepath: 'README.md'
+      uc_filepath: 'README.md'
+      repo_uc_filepath: 'Master-Vendor-Alignment.README.md'
+      raw_github_url: 'https://raw.githubusercontent.com/SpendMend/Master-Vendor-Alignment/main/README.md'
+      filetype: 'md'
+      filesize: 2048
       dataTables: []
 
     OPERATORS:
@@ -140,11 +146,24 @@ def repo_filename_search(
     Returns:
         dict: Search results with keys:
               - status: "success" or "error"
-              - rows: List of matching rows (max 5 displayed)
+              - rows: List of matching rows (max 5 displayed), each row includes:
+                  - raw_github_url: PASS THIS DIRECTLY TO get_repo_file for reliable downloads
+                  - repo_name, filename, filepath, uc_filepath, repo_uc_filepath, filetype, etc.
               - total_count: Total matches found
               - columns: Column names returned
               - message: Human-readable summary
               - suggestion: If >5 results, suggests refinement or delegate_code_results()
+
+    RECOMMENDED WORKFLOW:
+    =====================
+    1. Search for files:
+       result = repo_filename_search(keyword="etl", filetype_filter="py")
+
+    2. Get raw_github_url from results:
+       urls = [row['raw_github_url'] for row in result['rows']]
+
+    3. Download using raw_github_url (PREFERRED - deterministic):
+       get_repo_file(filepaths=urls)
     """
     from databricks.sdk import WorkspaceClient
     import time
@@ -233,7 +252,25 @@ def repo_filename_search(
     where_clause = " AND ".join(where_clauses)
 
     # Build queries
-    select_cols = "repo_name, filename, filepath, filetype, filesize, last_modified_timestamp, dataTables"
+    # Add computed columns to eliminate downstream ambiguity:
+    # - `uc_filepath` converts directory separators to dots (e.g., src/etl/a.py -> src.etl.a.py)
+    # - `repo_uc_filepath` is "<repo_name>.<uc_filepath>" for legacy compatibility
+    # - `raw_github_url` is the READY-TO-USE download URL for get_repo_file (PREFERRED)
+    #
+    # IMPORTANT: The `raw_github_url` column eliminates URL construction ambiguity.
+    # Models should pass this URL directly to get_repo_file for deterministic downloads.
+    select_cols = (
+        "repo_name, "
+        "filename, "
+        "filepath, "
+        "replace(filepath, '/', '.') AS uc_filepath, "
+        "concat(repo_name, '.', replace(filepath, '/', '.')) AS repo_uc_filepath, "
+        "concat('https://raw.githubusercontent.com/SpendMend/', repo_name, '/main/', filepath) AS raw_github_url, "
+        "filetype, "
+        "filesize, "
+        "last_modified_timestamp, "
+        "dataTables"
+    )
     count_sql = f"SELECT COUNT(*) as cnt FROM {target_table} WHERE {where_clause}"
     select_sql = f"SELECT {select_cols} FROM {target_table} WHERE {where_clause} ORDER BY last_modified_timestamp DESC LIMIT {MAX_DISPLAY_ROWS + 1}"
 

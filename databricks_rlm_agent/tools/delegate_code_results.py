@@ -11,6 +11,8 @@ The tool:
    - temp:rlm:artifact_id - The artifact identifier (invocation-scoped)
    - temp:rlm:sublm_instruction - The instruction for results_processor_agent
    - temp:rlm:has_agent_code - Whether there is code to execute
+   - temp:rlm:stage - Stage tracking: "delegated" (invocation-scoped)
+   - temp:rlm:active_artifact_id - Active artifact for stage gating (invocation-scoped)
    - rlm:iteration - Incremented iteration counter (session-scoped)
 5. Triggers escalation to let LoopAgent invoke the next sub-agent
 
@@ -59,6 +61,11 @@ STATE_CODE_ARTIFACT_KEY = "temp:rlm:code_artifact_key"
 STATE_SESSION_ID = "temp:rlm:session_id"
 STATE_INVOCATION_ID = "temp:rlm:invocation_id"
 STATE_TEMP_PARSED_BLOB = "temp:parsed_blob"
+
+# Stage tracking keys - invocation-scoped (replaces pruning plugin for correctness)
+# Stage progression: "delegated" -> "executed" -> "processed"
+STATE_STAGE = "temp:rlm:stage"
+STATE_ACTIVE_ARTIFACT_ID = "temp:rlm:active_artifact_id"
 
 # Session-scoped state key (persists across invocations)
 STATE_ITERATION = "rlm:iteration"
@@ -168,6 +175,11 @@ async def delegate_code_results(code: str, tool_context: ToolContext) -> dict[st
     tool_context.state[STATE_CODE_ARTIFACT_KEY] = code_artifact_key
     tool_context.state[STATE_SESSION_ID] = session_id
     tool_context.state[STATE_INVOCATION_ID] = invocation_id
+
+    # Set stage tracking keys (replaces pruning plugin for correctness)
+    # This enables downstream agents to verify they should act on current state
+    tool_context.state[STATE_STAGE] = "delegated"
+    tool_context.state[STATE_ACTIVE_ARTIFACT_ID] = artifact_id
 
     # Create metadata entry in the artifact registry Delta table
     registry_created = False

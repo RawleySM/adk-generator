@@ -57,14 +57,14 @@ uv run scripts/run_and_wait.py --job-id 12345 \
 
 ```
 databricks_analyst → delegate_code_results() → [validation plugins] → artifact registry
-                                                                           ↓
-                                                                     job_builder (BaseAgent)
-                                                                           ↓
-                                                                      Job_B executor
-                                                                           ↓
-                                                             results_processor_agent (with injected context)
-                                                                           ↓
-                                                                     context pruning → loop continues
+        │                                                                   ↓
+        │                                                             job_builder (BaseAgent)
+        │                                                                   ↓
+        │               stage="delegated"                            Job_B executor
+        │                     ↓                                            ↓
+        │               stage="executed"                      results_processor_agent (with injected context)
+        │                     ↓                                            ↓
+        └─────────────  stage="processed" ←───────────────────── loop continues
 ```
 
 ### Agent Sequence in LoopAgent
@@ -104,8 +104,9 @@ root_agent (LoopAgent)
 
 | File | Purpose |
 |------|---------|
-| `plugins/rlm_context_injection_plugin.py` | Injects execution results into results_processor_agent |
-| `plugins/rlm_context_pruning_plugin.py` | Clears state after results_processor_agent completes |
+| `plugins/rlm_context_injection_plugin.py` | Injects execution results into results_processor_agent; manages stage transitions |
+
+> **Note:** `rlm_context_pruning_plugin.py` was removed in Issue 004. Its responsibilities (staleness prevention, artifact consumed marking) are now handled by explicit stage gating and `JobBuilderAgent`. See `docs/issue_004_implementation_summary.md`.
 
 ### Phase 6: job_builder Agent
 
@@ -121,7 +122,7 @@ root_agent (LoopAgent)
 | `agent.py` | Added job_builder, results_processor_agent to LoopAgent; wired all new plugins |
 | `run.py` | Added InMemoryArtifactService to Runner configuration |
 | `executor.py` | Added `execute_from_registry()` function and RLM markers for log parsing |
-| `plugins/__init__.py` | Exported new plugins (FormattingCheckPlugin, CodeLintingPlugin, RlmContextInjectionPlugin, RlmContextPruningPlugin) |
+| `plugins/__init__.py` | Exported plugins (FormattingCheckPlugin, CodeLintingPlugin, RlmContextInjectionPlugin) |
 | `tools/__init__.py` | Exported delegate_code_results tool |
 
 ## Key ADK Patterns Used
@@ -172,17 +173,23 @@ async def before_agent_callback(self, *, callback_context):
 
 > **Note:** The plugin attempts to load stdout/stderr from `result.json` in UC Volumes first (via `temp:rlm:result_json_path`), falling back to state values. This ensures full output is available even when state stores only truncated previews.
 
-### 4. State Pruning
+### 4. State Management (Stage-Based Gating)
 
-After migration, `temp:rlm:*` keys auto-discard so explicit pruning is mostly defensive. During migration, the plugin clears both `temp:rlm:*` and legacy `rlm:*` keys:
+> **Updated in Issue 004:** Explicit state pruning via `RlmContextPruningPlugin` has been replaced with stage-based gating.
+
+The `temp:rlm:stage` key tracks workflow progress: `delegated` → `executed` → `processed`. Each component checks the stage before acting, preventing stale state from triggering work in later LoopAgent iterations:
 
 ```python
-async def after_agent_callback(self, *, callback_context):
-    # Clear both temp:rlm:* and legacy rlm:* during migration
-    for key in INVOCATION_KEYS_TO_CLEAR + LEGACY_KEYS_TO_CLEAR:
-        if key in callback_context.state:
-            callback_context.state[key] = None  # None signals deletion
+# In job_builder: only act when stage is "delegated"
+current_stage = ctx.session.state.get("temp:rlm:stage")
+if current_stage != "delegated":
+    return  # Skip - not in correct stage
+
+# After successful execution:
+ctx.session.state["temp:rlm:stage"] = "executed"
 ```
+
+The `temp:rlm:*` keys continue to be invocation-scoped and auto-discarded by `DeltaSessionService` after each invocation.
 
 ### 5. ArtifactService Integration
 ```python
@@ -218,8 +225,9 @@ Plugins are configured in **two locations** with different scopes:
 3. **linting_plugin** - Validate Python syntax
 4. **logging_plugin** - Telemetry and logging
 5. **global_instruction_plugin** - Inject global instructions
-6. **context_injection_plugin** - Inject context to results_processor
-7. **context_pruning_plugin** - Clear state after processing
+6. **context_injection_plugin** - Inject context to results_processor; manage stage transitions
+
+> **Note:** `context_pruning_plugin` was removed in Issue 004. Stage-based gating (`temp:rlm:stage`) now prevents stale state reuse.
 
 **Runner plugins** (`run.py`) - Core infrastructure plugins:
 - `logging_plugin` - Session-level logging
@@ -235,6 +243,8 @@ These keys use the `temp:` prefix and are auto-discarded by `DeltaSessionService
 
 | Key | Type | Description | Set By | Cleared By |
 |-----|------|-------------|--------|------------|
+| `temp:rlm:stage` | str | Stage gate: "delegated"→"executed"→"processed" (Issue 004) | delegate_code_results, job_builder, context_injection_plugin | auto-discarded |
+| `temp:rlm:active_artifact_id` | str | Artifact ID for current stage (Issue 004) | delegate_code_results | auto-discarded |
 | `temp:rlm:artifact_id` | str | Current artifact identifier | delegate_code_results | auto-discarded |
 | `temp:rlm:sublm_instruction` | str | Instruction for results_processor_agent | delegate_code_results | auto-discarded |
 | `temp:rlm:has_agent_code` | bool | Whether artifact has code to execute | delegate_code_results | auto-discarded |
@@ -261,10 +271,11 @@ These keys persist across invocations intentionally:
 | Key | Type | Description | Set By | Cleared By |
 |-----|------|-------------|--------|------------|
 | `rlm:iteration` | int | Current loop iteration counter | delegate_code_results | **Preserved** |
+| `rlm:last_results_summary` | str | Last results_processor output (Issue 004) | results_processor (via `output_key`) | **Preserved** |
 
 ### Legacy Keys (Migration)
 
-During migration, readers use `get_rlm_state()` which tries `temp:rlm:*` first, falling back to `rlm:*`. Legacy `rlm:*` keys (e.g., `rlm:artifact_id`) are no longer written but may exist in older sessions. The pruning plugin clears both `temp:rlm:*` and `rlm:*` variants for safety.
+During migration, readers use `get_rlm_state()` which tries `temp:rlm:*` first, falling back to `rlm:*`. Legacy `rlm:*` keys (e.g., `rlm:artifact_id`) are no longer written but may exist in older sessions. Stage-based gating (`temp:rlm:stage`) prevents stale keys from triggering unintended work.
 
 ## RLM Markers for Log Parsing
 
@@ -345,4 +356,5 @@ class DeltaArtifactService(BaseArtifactService):
 - [ ] Verify artifact registry row created
 - [ ] Verify Job_B reads from registry by artifact_id
 - [ ] Verify results_processor_agent receives injected context
-- [ ] Verify state keys cleared after processing
+- [ ] Verify stage transitions: `delegated` → `executed` → `processed`
+- [ ] Verify artifact marked consumed after successful execution

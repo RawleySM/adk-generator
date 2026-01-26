@@ -419,6 +419,22 @@ else
     log_warn "LiteLLM OpenAI models will fail without this key."
 fi
 
+# GitHub Token (needed for get_repo_file tool to download code from GitHub)
+GITHUB_TOKEN_EXISTS=$(databricks secrets list-secrets "$SECRET_SCOPE" --profile "$DATABRICKS_PROFILE" --output json 2>/dev/null | \
+    jq -r '.[]? | select(.key == "github-token") | .key' || echo "")
+
+if [[ -n "$GITHUB_TOKEN" && "$GITHUB_TOKEN" != "your-github-token-here" ]]; then
+    log_info "Storing github-token in secret scope..."
+    echo -n "$GITHUB_TOKEN" | databricks secrets put-secret "$SECRET_SCOPE" "github-token" --profile "$DATABRICKS_PROFILE" 2>/dev/null || \
+        databricks secrets put-secret "$SECRET_SCOPE" "github-token" --string-value "$GITHUB_TOKEN" --profile "$DATABRICKS_PROFILE"
+    log_success "github-token stored"
+elif [[ -n "$GITHUB_TOKEN_EXISTS" ]]; then
+    log_success "github-token already exists in secret scope"
+else
+    log_warn "GITHUB_TOKEN not set in .env and not found in secret scope '$SECRET_SCOPE'"
+    log_warn "The get_repo_file tool will not be able to download code from GitHub."
+fi
+
 # =============================================================================
 # Step 8: Store Job IDs in Secret Scope
 # =============================================================================
