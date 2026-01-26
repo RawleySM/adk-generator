@@ -371,6 +371,8 @@ class JobBuilderAgent(BaseAgent):
         user_id = getattr(session, "user_id", None) or os.environ.get(
             "ADK_DEFAULT_USER_ID", "job_user"
         )
+        # InMemoryArtifactService requires session_id for session-scoped artifacts
+        session_id = getattr(session, "id", None)
 
         if hasattr(ctx, "load_artifact"):
             try:
@@ -384,13 +386,14 @@ class JobBuilderAgent(BaseAgent):
 
         artifact_service = getattr(ctx, "artifact_service", None)
         if artifact_service and hasattr(artifact_service, "load_artifact"):
-            # InMemoryArtifactService requires app_name/user_id for session-scoped artifacts.
+            # InMemoryArtifactService requires app_name/user_id/session_id for session-scoped artifacts.
             # Try with session context first, then without as fallback.
             try:
                 result = artifact_service.load_artifact(
                     filename=filename,
                     app_name=app_name,
                     user_id=user_id,
+                    session_id=session_id,
                 )
                 # Handle async methods
                 if inspect.iscoroutine(result):
