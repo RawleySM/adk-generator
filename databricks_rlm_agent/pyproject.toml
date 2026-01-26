@@ -1,6 +1,6 @@
 [project]
 name = "databricks_rlm_agent"
-version = "0.1.67"
+version = "0.1.73"
 description = "RLM Agent for Databricks with Delta session persistence - Two-job orchestrator/executor pattern"
 requires-python = ">=3.10"
 dependencies = [

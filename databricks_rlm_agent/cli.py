@@ -262,7 +262,8 @@ def orchestrator_main():
     args.session_id = args.session_id or _get_job_parameter("ADK_SESSION_ID", "session_001")
     args.user_id = args.user_id or _get_job_parameter("ADK_USER_ID", "job_user")
     args.prompt = args.prompt or _get_job_parameter("ADK_PROMPT", "")
-    args.max_iterations = args.max_iterations or int(_get_job_parameter("ADK_MAX_ITERATIONS", "1"))
+    # Default to 30 loops unless overridden (job param or CLI arg).
+    args.max_iterations = args.max_iterations or int(_get_job_parameter("ADK_MAX_ITERATIONS", "30"))
 
     # IMPORTANT (Databricks Jobs):
     # Job "parameters" are NOT environment variables on existing clusters.

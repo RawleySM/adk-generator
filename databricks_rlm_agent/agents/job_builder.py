@@ -205,7 +205,8 @@ class JobBuilderAgent(BaseAgent):
         if code_artifact_key:
             try:
                 # Load from ArtifactService (Job_A-local storage)
-                code_part = self._load_artifact_part(ctx, code_artifact_key)
+                # Note: _load_artifact_part is async to handle InMemoryArtifactService
+                code_part = await self._load_artifact_part(ctx, code_artifact_key)
                 if code_part:
                     agent_code = code_part.text if hasattr(code_part, "text") else str(code_part)
                     logger.info(f"[JOB_BUILDER] Loaded code from artifact: {code_artifact_key}")
@@ -351,32 +352,64 @@ class JobBuilderAgent(BaseAgent):
 
         yield self._create_text_event(ctx, summary, is_final=True, state_delta=state_delta)
 
-    def _load_artifact_part(self, ctx: InvocationContext, filename: str) -> Optional[types.Part]:
+    async def _load_artifact_part(self, ctx: InvocationContext, filename: str) -> Optional[types.Part]:
         """Load an artifact part from the configured ArtifactService.
 
         ADK context APIs vary by version; try the direct context helper first,
         then fall back to the artifact_service instance if exposed.
+
+        Note: This method is async because InMemoryArtifactService.load_artifact
+        is an async method.
         """
+        import inspect
+
+        # Get session context for artifact service calls
+        session = getattr(ctx, "session", None)
+        app_name = getattr(session, "app_name", None) or os.environ.get(
+            "ADK_APP_NAME", "databricks_rlm_agent"
+        )
+        user_id = getattr(session, "user_id", None) or os.environ.get(
+            "ADK_DEFAULT_USER_ID", "job_user"
+        )
+
         if hasattr(ctx, "load_artifact"):
-            return ctx.load_artifact(filename=filename)
+            try:
+                result = ctx.load_artifact(filename=filename)
+                # Handle async methods
+                if inspect.iscoroutine(result):
+                    result = await result
+                return result
+            except Exception as e:
+                logger.debug(f"[JOB_BUILDER] ctx.load_artifact failed: {e}, trying artifact_service fallback")
 
         artifact_service = getattr(ctx, "artifact_service", None)
         if artifact_service and hasattr(artifact_service, "load_artifact"):
-            # Some ArtifactService implementations require app_name/user_id.
+            # InMemoryArtifactService requires app_name/user_id for session-scoped artifacts.
+            # Try with session context first, then without as fallback.
             try:
-                return artifact_service.load_artifact(filename=filename)
-            except TypeError:
-                app_name = getattr(getattr(ctx, "session", None), "app_name", None) or os.environ.get(
-                    "ADK_APP_NAME", "databricks_rlm_agent"
-                )
-                user_id = getattr(getattr(ctx, "session", None), "user_id", None) or os.environ.get(
-                    "ADK_DEFAULT_USER_ID", "job_user"
-                )
-                return artifact_service.load_artifact(
+                result = artifact_service.load_artifact(
                     filename=filename,
                     app_name=app_name,
                     user_id=user_id,
                 )
+                # Handle async methods
+                if inspect.iscoroutine(result):
+                    result = await result
+                return result
+            except TypeError:
+                # Some implementations don't require app_name/user_id
+                try:
+                    result = artifact_service.load_artifact(filename=filename)
+                    # Handle async methods
+                    if inspect.iscoroutine(result):
+                        result = await result
+                    return result
+                except Exception as e:
+                    logger.error(f"[JOB_BUILDER] artifact_service.load_artifact fallback failed: {e}")
+                    raise
+            except Exception as e:
+                logger.error(f"[JOB_BUILDER] artifact_service.load_artifact failed: {e}")
+                raise
 
         logger.warning("[JOB_BUILDER] ArtifactService not available on InvocationContext")
         return None

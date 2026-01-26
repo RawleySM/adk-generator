@@ -56,7 +56,7 @@ resources:
         - name: ADK_USER_ID
           default: "job_user"
         - name: ADK_MAX_ITERATIONS
-          default: "1"
+          default: "30"
         - name: TEST_LEVEL
           default: ""  # Test task level (1-10) - bypasses ingestor polling for E2E testing
         # Model provider configuration

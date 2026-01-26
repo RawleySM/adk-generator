@@ -18,7 +18,7 @@ The orchestrator job accepts the following parameters:
 | `ADK_PROMPT_FILE` | `--prompt-file` | `/Volumes/silo_dev_rs/task/task_txt/task.txt` | Path to file containing the prompt (UC Volumes, DBFS, or local) |
 | `ADK_SESSION_ID` | `--session-id` | `"session_001"` | Session identifier for Delta persistence |
 | `ADK_USER_ID` | `--user-id` | `"job_user"` | User identifier for session ownership |
-| `ADK_MAX_ITERATIONS` | `--max-iterations` | `1` | Maximum RLM loop iterations |
+| `ADK_MAX_ITERATIONS` | `--max-iterations` | `30` | Maximum RLM loop iterations |
 | `ADK_DELTA_CATALOG` | `--catalog` | `"silo_dev_rs"` | Unity Catalog for session/telemetry tables |
 | `ADK_DELTA_SCHEMA` | `--schema` | `"adk"` | Schema within the catalog |
 | `ADK_EXECUTOR_JOB_ID` | - | - | Job ID of Job_B (executor) for RLM loop |

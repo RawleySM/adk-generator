@@ -485,40 +485,50 @@ if [[ -z "$INGESTOR_JOB_ID" ]]; then
 else
     log_info "[10/11] Wiring orchestrator job ID into ingestor job..."
 
-# Get current ingestor job settings (new CLI syntax: JOB_ID as positional argument)
-INGESTOR_PARAMS=$(databricks jobs get "$INGESTOR_JOB_ID" --profile "$DATABRICKS_PROFILE" --output json 2>/dev/null | \
-    jq '.settings.parameters // []')
+    # Get current ingestor job settings (new CLI syntax: JOB_ID as positional argument)
+    INGESTOR_PARAMS=$(databricks jobs get "$INGESTOR_JOB_ID" --profile "$DATABRICKS_PROFILE" --output json 2>/dev/null | \
+        jq '.settings.parameters // []')
 
-# Check if ADK_ORCHESTRATOR_JOB_ID parameter already exists with correct value
-EXISTING_ORCHESTRATOR_ID=$(echo "$INGESTOR_PARAMS" | jq -r '.[] | select(.name == "ADK_ORCHESTRATOR_JOB_ID") | .default // ""')
-
-if [[ "$EXISTING_ORCHESTRATOR_ID" == "$ORCHESTRATOR_JOB_ID" ]]; then
-    log_success "ADK_ORCHESTRATOR_JOB_ID already configured correctly in ingestor"
-else
-    log_info "Updating ingestor job with orchestrator job ID..."
-
-    # Build updated parameters array - replace or add ADK_ORCHESTRATOR_JOB_ID
-    UPDATED_INGESTOR_PARAMS=$(echo "$INGESTOR_PARAMS" | jq --arg job_id "$ORCHESTRATOR_JOB_ID" '
-        [.[] | select(.name == "ADK_ORCHESTRATOR_JOB_ID" | not)] +
-        [{"name": "ADK_ORCHESTRATOR_JOB_ID", "default": $job_id}]
-    ')
-
-    # Create the update payload (API uses "new_settings" not "settings")
-    INGESTOR_UPDATE_PAYLOAD=$(jq -n --argjson params "$UPDATED_INGESTOR_PARAMS" --arg job_id "$INGESTOR_JOB_ID" '{
-        "job_id": ($job_id | tonumber),
-        "new_settings": {
-            "parameters": $params
-        }
-    }' -c)
-
-    # Update the job (CLI requires job_id in JSON when using --json flag)
-if databricks jobs update --profile "$DATABRICKS_PROFILE" --json "$INGESTOR_UPDATE_PAYLOAD" 2>/dev/null; then
-        log_success "Ingestor job updated with ADK_ORCHESTRATOR_JOB_ID=$ORCHESTRATOR_JOB_ID"
-    else
-        log_warn "Could not update ingestor job parameters via API (may require manual configuration)"
-        log_warn "Set ADK_ORCHESTRATOR_JOB_ID=$ORCHESTRATOR_JOB_ID in the ingestor job"
+    # Ensure INGESTOR_PARAMS is valid JSON (default to empty array if not)
+    if [[ -z "$INGESTOR_PARAMS" ]] || ! echo "$INGESTOR_PARAMS" | jq empty 2>/dev/null; then
+        INGESTOR_PARAMS="[]"
     fi
-fi
+
+    # Check if ADK_ORCHESTRATOR_JOB_ID parameter already exists with correct value
+    EXISTING_ORCHESTRATOR_ID=$(echo "$INGESTOR_PARAMS" | jq -r '.[] | select(.name == "ADK_ORCHESTRATOR_JOB_ID") | .default // ""' 2>/dev/null || echo "")
+
+    if [[ "$EXISTING_ORCHESTRATOR_ID" == "$ORCHESTRATOR_JOB_ID" ]]; then
+        log_success "ADK_ORCHESTRATOR_JOB_ID already configured correctly in ingestor"
+    else
+        log_info "Updating ingestor job with orchestrator job ID..."
+
+        # Build updated parameters array - replace or add ADK_ORCHESTRATOR_JOB_ID
+        UPDATED_INGESTOR_PARAMS=$(echo "$INGESTOR_PARAMS" | jq --arg job_id "$ORCHESTRATOR_JOB_ID" '
+            [.[] | select(.name == "ADK_ORCHESTRATOR_JOB_ID" | not)] +
+            [{"name": "ADK_ORCHESTRATOR_JOB_ID", "default": $job_id}]
+        ' 2>/dev/null)
+
+        # Fallback if jq failed
+        if [[ -z "$UPDATED_INGESTOR_PARAMS" ]] || ! echo "$UPDATED_INGESTOR_PARAMS" | jq empty 2>/dev/null; then
+            UPDATED_INGESTOR_PARAMS="[{\"name\": \"ADK_ORCHESTRATOR_JOB_ID\", \"default\": \"$ORCHESTRATOR_JOB_ID\"}]"
+        fi
+
+        # Create the update payload (API uses "new_settings" not "settings")
+        INGESTOR_UPDATE_PAYLOAD=$(jq -n --argjson params "$UPDATED_INGESTOR_PARAMS" --arg job_id "$INGESTOR_JOB_ID" '{
+            "job_id": ($job_id | tonumber),
+            "new_settings": {
+                "parameters": $params
+            }
+        }' -c)
+
+        # Update the job (CLI requires job_id in JSON when using --json flag)
+        if databricks jobs update --profile "$DATABRICKS_PROFILE" --json "$INGESTOR_UPDATE_PAYLOAD" 2>/dev/null; then
+            log_success "Ingestor job updated with ADK_ORCHESTRATOR_JOB_ID=$ORCHESTRATOR_JOB_ID"
+        else
+            log_warn "Could not update ingestor job parameters via API (may require manual configuration)"
+            log_warn "Set ADK_ORCHESTRATOR_JOB_ID=$ORCHESTRATOR_JOB_ID in the ingestor job"
+        fi
+    fi
 fi
 
 # =============================================================================
