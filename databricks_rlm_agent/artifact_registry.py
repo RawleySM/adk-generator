@@ -35,6 +35,7 @@ from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
+    from pyspark.sql.types import StructType
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,38 @@ class ArtifactRegistry:
         ...     code_artifact_key="artifact_001_code.py",
         ... )
     """
+
+    @staticmethod
+    def _get_schema() -> "StructType":
+        """Get the explicit schema for the artifact registry DataFrame.
+
+        This schema is required when creating DataFrames with None values
+        to avoid Spark's [CANNOT_DETERMINE_TYPE] error during type inference.
+        """
+        from pyspark.sql.types import (
+            StructType,
+            StructField,
+            StringType,
+            IntegerType,
+            TimestampType,
+        )
+
+        return StructType([
+            StructField("artifact_id", StringType(), nullable=False),
+            StructField("session_id", StringType(), nullable=False),
+            StructField("invocation_id", StringType(), nullable=False),
+            StructField("iteration", IntegerType(), nullable=False),
+            StructField("artifact_type", StringType(), nullable=False),
+            StructField("sublm_instruction", StringType(), nullable=True),
+            StructField("code_artifact_key", StringType(), nullable=True),
+            StructField("stdout_artifact_key", StringType(), nullable=True),
+            StructField("stderr_artifact_key", StringType(), nullable=True),
+            StructField("status", StringType(), nullable=False),
+            StructField("metadata_json", StringType(), nullable=True),
+            StructField("created_time", TimestampType(), nullable=False),
+            StructField("updated_time", TimestampType(), nullable=False),
+            StructField("consumed_time", TimestampType(), nullable=True),
+        ])
 
     # DDL template for creating the artifact registry table
     CREATE_TABLE_DDL = """
@@ -237,9 +270,10 @@ class ArtifactRegistry:
             updated_time=now,
         )
 
-        # Insert into Delta table
+        # Insert into Delta table using explicit schema to avoid
+        # [CANNOT_DETERMINE_TYPE] error when columns have None values
         data = [artifact.to_dict()]
-        df = self._spark.createDataFrame(data)
+        df = self._spark.createDataFrame(data, schema=self._get_schema())
         df.write.format("delta").mode("append").saveAsTable(self._full_table_name)
 
         logger.info(f"Created artifact: {artifact_id} (type={artifact_type}, session={session_id})")

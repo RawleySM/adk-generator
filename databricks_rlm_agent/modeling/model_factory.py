@@ -8,6 +8,8 @@ Configuration is read from environment variables or Databricks job parameters:
 - ADK_MODEL_PROVIDER: "gemini" (default) or "litellm"
 - ADK_GEMINI_MODEL: Model string for native Gemini (default: "gemini-3-pro-preview")
 - ADK_LITELLM_MODEL: Model string for LiteLLM (e.g., "openai/gpt-4o")
+- ADK_LITELLM_API_BASE: Optional API base URL (e.g., LiteLLM Proxy base URL)
+- ADK_LITELLM_EXTRA_HEADERS: Optional JSON dict for extra HTTP headers
 - ADK_LITELLM_FALLBACK_MODELS: Comma-separated fallback chain for LiteLLM
 - ADK_FALLBACK_ON_BLOCKED: Enable fallback on content-policy errors (default: "true")
 - ADK_FALLBACK_GEMINI_TO_LITELLM: Enable Gemini→LiteLLM fallback (default: "true")
@@ -16,6 +18,7 @@ Configuration is read from environment variables or Databricks job parameters:
 from __future__ import annotations
 
 import os
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Union, TYPE_CHECKING
@@ -65,6 +68,8 @@ def get_model_config() -> ModelConfig:
         ADK_MODEL_PROVIDER: "gemini" (default) or "litellm"
         ADK_GEMINI_MODEL: Model string for native Gemini
         ADK_LITELLM_MODEL: Model string for LiteLLM
+        ADK_LITELLM_API_BASE: Optional API base URL (e.g., LiteLLM Proxy base URL)
+        ADK_LITELLM_EXTRA_HEADERS: Optional JSON dict for extra HTTP headers
         ADK_LITELLM_FALLBACK_MODELS: Comma-separated fallback chain
         ADK_FALLBACK_ON_BLOCKED: Enable fallback on content-policy errors
         ADK_FALLBACK_GEMINI_TO_LITELLM: Enable Gemini→LiteLLM fallback
@@ -117,7 +122,35 @@ def build_litellm_model(model_string: str) -> "LiteLlm":
     from google.adk.models.lite_llm import LiteLlm
     
     logger.info(f"[MODEL_FACTORY] Creating LiteLlm wrapper for: {model_string}")
-    return LiteLlm(model=model_string)
+
+    # Optional: allow routing through an OpenAI-compatible gateway (e.g. LiteLLM Proxy).
+    # This is useful for OpenAI Responses API usage because the proxy can bridge
+    # /chat/completions → /responses when needed.
+    api_base = os.environ.get("ADK_LITELLM_API_BASE", "").strip() or None
+
+    extra_headers_raw = os.environ.get("ADK_LITELLM_EXTRA_HEADERS", "").strip()
+    extra_headers = None
+    if extra_headers_raw:
+        try:
+            parsed = json.loads(extra_headers_raw)
+            if isinstance(parsed, dict):
+                extra_headers = parsed
+            else:
+                logger.warning(
+                    "[MODEL_FACTORY] ADK_LITELLM_EXTRA_HEADERS is not a JSON object; ignoring."
+                )
+        except Exception as e:
+            logger.warning(
+                f"[MODEL_FACTORY] Failed to parse ADK_LITELLM_EXTRA_HEADERS as JSON; ignoring. error={e}"
+            )
+
+    kwargs = {}
+    if api_base:
+        kwargs["api_base"] = api_base
+    if extra_headers:
+        kwargs["extra_headers"] = extra_headers
+
+    return LiteLlm(model=model_string, **kwargs)
 
 
 def build_agent_model(config: ModelConfig | None = None) -> ModelType:

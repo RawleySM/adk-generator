@@ -1,6 +1,6 @@
 [project]
 name = "databricks_rlm_agent"
-version = "0.1.80"
+version = "0.1.87"
 description = "RLM Agent for Databricks with Delta session persistence - Two-job orchestrator/executor pattern"
 requires-python = ">=3.10"
 dependencies = [
@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "nest-asyncio>=1.5.0",
     "databricks-sdk>=0.20.0",
+    "requests>=2.31.0",
     "litellm>=1.0.0",  # LiteLLM for multi-provider model support
     "tiktoken>=0.5.0",  # Token estimation for telemetry (cl100k_base encoding)
     # Note: pyspark is provided by Databricks Runtime, not packaged in wheel

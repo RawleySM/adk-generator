@@ -116,7 +116,10 @@ With capture OFF, these should be NULL.
   - Add pointer metadata under `state_snapshot_full` in telemetry payload JSON
   - Best-effort failure handling
 - `scripts/deploy_rlm_two_job_bundle.sh`
-  - Add optional CLI flag (or reuse env-to-param mapping) to pass `--param ADK_CAPTURE_STATE_SNAPSHOTS=1` when running
+  - Add a **dedicated CLI flag** (recommended) to avoid generic-param footguns:
+    - `--capture-state-snapshots` → appends `--param ADK_CAPTURE_STATE_SNAPSHOTS=1` to the orchestrator `run-now`
+  - Optional enhancement: add a generic passthrough (e.g., repeatable) for arbitrary job params:
+    - `--param KEY=VALUE` (repeatable) → appends `--param KEY=VALUE`
 - `scripts/llm_context_telemetry_view.sql`
   - Add columns extracting the new fields
 - `docs/llm_context_telemetry_implementation.md`
@@ -135,9 +138,10 @@ With capture OFF, these should be NULL.
 ## Test plan (E2E)
 - Deploy/run baseline:
   - `./scripts/deploy_rlm_two_job_bundle.sh --run --test-level 7`
-- Deploy/run with capture enabled (via job param pass-through):
+- Deploy/run with capture enabled (recommended dedicated flag):
+  - `./scripts/deploy_rlm_two_job_bundle.sh --run --test-level 7 --capture-state-snapshots`
+- (Optional) Deploy/run with capture enabled (generic param passthrough, if implemented):
   - `./scripts/deploy_rlm_two_job_bundle.sh --run --test-level 7 --param ADK_CAPTURE_STATE_SNAPSHOTS=1`
-  - (If the deploy script does not yet support a generic `--param`, add a dedicated flag or add the param directly in the script.)
 - Query pointers:
   - `SELECT llm_call_index, agent_name, state_snapshot_path, state_snapshot_sha256, state_snapshot_bytes`
     `FROM silo_dev_rs.adk.llm_context_telemetry`

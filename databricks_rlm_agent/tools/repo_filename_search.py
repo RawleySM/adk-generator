@@ -259,13 +259,31 @@ def repo_filename_search(
     #
     # IMPORTANT: The `raw_github_url` column eliminates URL construction ambiguity.
     # Models should pass this URL directly to get_repo_file for deterministic downloads.
+    #
+    # NOTE: The `filepath` column may use dots as directory separators (Unity Catalog convention).
+    # We convert these dots to slashes for the GitHub URL, preserving ONLY the file extension dot.
+    # Logic: Find extension (last .[alphanumeric]{1,10}), replace all other dots with '/'.
+    #
+    # Example: 'Services.JiraService.py' → 'Services/JiraService.py'
     select_cols = (
         "repo_name, "
         "filename, "
         "filepath, "
         "replace(filepath, '/', '.') AS uc_filepath, "
         "concat(repo_name, '.', replace(filepath, '/', '.')) AS repo_uc_filepath, "
-        "concat('https://raw.githubusercontent.com/SpendMend/', repo_name, '/main/', filepath) AS raw_github_url, "
+        "concat("
+        "  'https://raw.githubusercontent.com/SpendMend/', "
+        "  repo_name, "
+        "  '/main/', "
+        "  CASE "
+        "    WHEN filepath RLIKE '\\\\.[a-zA-Z0-9_]{1,10}$' THEN "
+        "      concat("
+        "        replace(regexp_replace(filepath, '\\\\.[a-zA-Z0-9_]{1,10}$', ''), '.', '/'), "
+        "        regexp_extract(filepath, '(\\\\.[a-zA-Z0-9_]{1,10})$', 1)"
+        "      ) "
+        "    ELSE replace(filepath, '.', '/') "
+        "  END"
+        ") AS raw_github_url, "
         "filetype, "
         "filesize, "
         "last_modified_timestamp, "

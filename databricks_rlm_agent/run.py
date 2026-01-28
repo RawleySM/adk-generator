@@ -179,8 +179,8 @@ async def run_conversation(
     user_id: str,
     session_id: str,
     prompt: str,
-    timeout_seconds: float = 900.0,
-    event_timeout_seconds: float = 300.0,
+    timeout_seconds: float | None = None,
+    event_timeout_seconds: float | None = None,
 ) -> ConversationResult:
     """Run a single conversation turn with timeout protection.
 
@@ -191,10 +191,11 @@ async def run_conversation(
         session_id: Session identifier.
         prompt: User prompt text.
         timeout_seconds: Maximum total time for the entire conversation turn.
-            Defaults to 900 seconds (15 minutes).
+            Defaults to ADK_TIMEOUT_SECONDS env var or 3600 seconds (1 hour).
         event_timeout_seconds: Maximum time to wait between events from the
             stream. If no event is received within this time, the conversation
-            is considered stalled. Defaults to 300 seconds (5 minutes).
+            is considered stalled. Defaults to ADK_EVENT_TIMEOUT_SECONDS env var
+            or 600 seconds (10 minutes).
 
     Returns:
         ConversationResult with response_text, status, fatal_error_msg, and delegation_count.
@@ -203,6 +204,15 @@ async def run_conversation(
         asyncio.TimeoutError: If the conversation exceeds timeout_seconds or
             if no events are received within event_timeout_seconds.
     """
+    # Resolve timeouts from environment variables with sensible defaults
+    # Default to 1 hour total, 10 minutes between events (suitable for complex tasks)
+    if timeout_seconds is None:
+        timeout_seconds = float(os.environ.get("ADK_TIMEOUT_SECONDS", "3600"))
+    if event_timeout_seconds is None:
+        event_timeout_seconds = float(os.environ.get("ADK_EVENT_TIMEOUT_SECONDS", "600"))
+    
+    print(f"[RUN] Timeout settings: total={timeout_seconds}s, event={event_timeout_seconds}s")
+    
     final_response = "No response generated."
     last_text_response = None  # Track the last text response seen
     exit_loop_detected = False  # Track if exit_loop was called (vs delegate_code_results)

@@ -501,6 +501,68 @@ Without delegate_code_results, context will exceed limits before completion.
 
 
 # =============================================================================
+# LEVEL 11 - Multi-Source Investigation with Tool Discovery
+# =============================================================================
+TASK_LEVEL_11 = TestTask(
+    difficulty=11,
+    issue_key="DEV-3202",
+    summary="Investigate Perplexity vendor matching implementation",
+    description="""
+A completed feature (DEV-3202) implemented AI-based vendor matching using Perplexity.
+Your task is to investigate how this feature works and document the implementation.
+
+**Investigation Goals:**
+
+1. **Understand the Perplexity Integration:**
+   - How is the Perplexity model integrated for vendor matching?
+   - What prompts or configurations are used?
+   - How does it compare to existing matching algorithms?
+
+2. **Analyze the Benchmark Data:**
+   - The ticket includes benchmark vendor data that was used to validate results
+   - What metrics or criteria were used to evaluate matching quality?
+   - What were the results of the batch runs?
+
+3. **Document the Data Flow:**
+   - Which Unity Catalog tables store vendor matching results?
+   - How does the client vendor data flow to the AI model?
+   - What fields from jobmatchentities and vendors tables are relevant?
+
+4. **Code Architecture Review:**
+   - Locate the implementation code for the Perplexity vendor matching
+   - Document key functions and their responsibilities
+   - Identify configuration parameters and dependencies
+
+**Deliverables:**
+- Summary of how Perplexity is integrated for vendor matching
+- Analysis of benchmark data and results
+- Data flow diagram (text-based) showing tables and transformations
+- Code references with brief explanations of key components
+- Recommendations for future improvements or monitoring
+
+**Acceptance Criteria:**
+- All four investigation areas addressed with evidence
+- Code snippets or file references provided
+- Clear understanding of how AI-assisted matching works
+- Actionable insights for maintaining or improving the feature
+
+**Hint:** The relevant Jira ticket and codebase both contain important context.
+The vendor matching domain spans multiple schemas in silo_dev_rs.
+""",
+    priority="High",
+    story_points=13.0,
+    expected_tables=[
+        "silo_dev_rs.dbo.vendors",
+        "silo_dev_rs.dbo.jobmatchentities",
+        "silo_dev_rs.dbo.algorithmmatchresults",
+        "silo_dev_rs.task.ai_vendor_match_enriched",
+        "silo_dev_rs.task.jira_raw_dev"
+    ],
+    delegation_benefit="Essential for synthesizing code review, data analysis, and documentation into coherent investigation report"
+)
+
+
+# =============================================================================
 # Task Registry
 # =============================================================================
 TASKS = {
@@ -514,6 +576,7 @@ TASKS = {
     8: TASK_LEVEL_8,
     9: TASK_LEVEL_9,
     10: TASK_LEVEL_10,
+    11: TASK_LEVEL_11,
 }
 
 

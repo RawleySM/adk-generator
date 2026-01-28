@@ -61,17 +61,22 @@ resources:
           default: ""  # Test task level (1-10) - bypasses ingestor polling for E2E testing
         # Model provider configuration
         - name: ADK_MODEL_PROVIDER
-          default: "litellm"  # "gemini" (native ADK) or "litellm" (multi-provider)
+          default: "litellm"  # "gemini" (native ADK) or "litellm" (LiteLLM multi-provider)
         - name: ADK_GEMINI_MODEL
           default: "gemini-3-pro-preview"  # Model for native Gemini provider (unused when litellm)
         - name: ADK_LITELLM_MODEL
-          default: "openai/gpt-5.2"  # Primary model for LiteLLM provider
+          default: "openai/gpt-5.2"  # Primary model for LiteLLM provider (OpenAI model id: gpt-5.2; usable via Chat Completions or Responses API)
         - name: ADK_LITELLM_FALLBACK_MODELS
           default: ""  # Comma-separated fallback chain (e.g., "openai/gpt-4o-mini,anthropic/claude-3-haiku-20240307")
         - name: ADK_FALLBACK_ON_BLOCKED
           default: "true"  # Enable fallback on content-policy errors
         - name: ADK_FALLBACK_GEMINI_TO_LITELLM
           default: "true"  # Enable Gemini->LiteLLM fallback on blocking errors
+        # Timeout configuration
+        - name: ADK_TIMEOUT_SECONDS
+          default: "3600"  # Total conversation timeout (1 hour)
+        - name: ADK_EVENT_TIMEOUT_SECONDS
+          default: "600"  # Event timeout between stream events (10 minutes)
 
       # Job settings
       max_concurrent_runs: 1

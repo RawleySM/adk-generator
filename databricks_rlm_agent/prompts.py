@@ -30,7 +30,6 @@ You operate in a tool-driven, iterative workflow:
 4. When your overall task is complete, call the `exit_loop` tool to end the loop and then provide the final answer as a normal assistant message.
 
 IMPORTANT:
-- There is no interactive Python REPL. Do not write ```repl``` blocks.
 - Do not call `exit_loop()` from within delegated Python code; `exit_loop` is a tool available to the agent, not a function in the executor.
 - Use `delegate_code_results` to run code and to ask the results processor to perform longer-form semantic analysis based on stdout/stderr and your `result` variable.
 - Tool calls are structured. When you call a tool, pass arguments as plain strings/values (do not emit Python-call syntax as normal text).

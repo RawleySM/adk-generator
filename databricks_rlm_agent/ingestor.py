@@ -34,9 +34,11 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional, TYPE_CHECKING
+
+from .utils.jira_attachments import download_jira_attachments, DEFAULT_TARGET_VOLUME
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -58,6 +60,9 @@ class JiraTask:
     status: str
     commit_version: int
     raw_data: dict[str, Any]
+    has_attachments: bool = False
+    attachment_count: int = 0
+    downloaded_attachments: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -68,6 +73,9 @@ class JiraTask:
             "assignee": self.assignee,
             "status": self.status,
             "commit_version": self.commit_version,
+            "has_attachments": self.has_attachments,
+            "attachment_count": self.attachment_count,
+            "downloaded_attachments": self.downloaded_attachments,
         }
 
 
@@ -321,6 +329,27 @@ class IngestorService:
                 assignee = getattr(row, assignee_col, self.assignee_filter) if assignee_col else self.assignee_filter
                 commit_version = row._commit_version
 
+                # Check for attachments - look for common column patterns
+                attachment_count = 0
+                has_attachments = False
+                for att_col in ["ATTACHMENT__attachment", "attachment", "ATTACHMENT", "attachments"]:
+                    if att_col in columns:
+                        att_val = getattr(row, att_col, None)
+                        if att_val is not None:
+                            # Attachment value could be a count, list, or non-null marker
+                            if isinstance(att_val, (list, tuple)):
+                                attachment_count = len(att_val)
+                            elif isinstance(att_val, int):
+                                attachment_count = att_val
+                            elif isinstance(att_val, str) and att_val.strip():
+                                # Non-empty string indicates attachments exist
+                                attachment_count = 1
+                            else:
+                                # Any other truthy value
+                                attachment_count = 1 if att_val else 0
+                            has_attachments = attachment_count > 0
+                            break
+
                 task = JiraTask(
                     issue_key=issue_key,
                     summary=summary,
@@ -329,6 +358,8 @@ class IngestorService:
                     status=status,
                     commit_version=commit_version,
                     raw_data=row.asDict(),
+                    has_attachments=has_attachments,
+                    attachment_count=attachment_count,
                 )
                 tasks.append(task)
 
@@ -343,6 +374,70 @@ class IngestorService:
                     "Run: ALTER TABLE {self.trigger_table} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)"
                 )
             raise
+
+    def download_task_attachments(
+        self,
+        task: JiraTask,
+        target_volume: str = DEFAULT_TARGET_VOLUME,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Download attachments for a task if it has any.
+
+        Args:
+            task: The JiraTask with potential attachments.
+            target_volume: UC Volumes directory to write downloads under.
+            dry_run: If True, log but don't actually download.
+
+        Returns:
+            Download result dict with status, files, etc.
+        """
+        if not task.has_attachments:
+            logger.debug(f"Task {task.issue_key} has no attachments to download")
+            return {
+                "status": "skipped",
+                "message": "No attachments on this task",
+                "issue_key": task.issue_key,
+            }
+
+        if dry_run:
+            logger.info(f"[DRY RUN] Would download attachments for task: {task.issue_key}")
+            return {
+                "status": "dry_run",
+                "message": f"Would download attachments for {task.issue_key}",
+                "issue_key": task.issue_key,
+                "attachment_count": task.attachment_count,
+            }
+
+        logger.info(f"Downloading attachments for task {task.issue_key}")
+
+        # Generate session_id for artifact registry
+        session_id = f"jira_{task.issue_key}_{task.commit_version}"
+
+        result = download_jira_attachments(
+            tickets_csv=task.issue_key,
+            target_volume=target_volume,
+            session_id=session_id,
+            invocation_id=f"ingest_{task.issue_key}",
+            iteration=0,
+            register_artifacts=True,
+        )
+
+        # Update task with downloaded attachment paths
+        if result.get("status") in ("success", "partial"):
+            task.downloaded_attachments = [
+                f.get("output_path")
+                for f in result.get("files", [])
+                if f.get("success") and f.get("output_path")
+            ]
+            logger.info(
+                f"Downloaded {len(task.downloaded_attachments)} attachments for {task.issue_key}"
+            )
+        else:
+            logger.warning(
+                f"Failed to download attachments for {task.issue_key}: {result.get('message')}"
+            )
+
+        return result
 
     def trigger_orchestrator(
         self,
@@ -378,6 +473,11 @@ class IngestorService:
             "ADK_DELTA_SCHEMA": self.schema,
             "ADK_TASK_ISSUE_KEY": task.issue_key,
         }
+
+        # Include attachment paths if any were downloaded
+        if task.downloaded_attachments:
+            job_params["ADK_ATTACHMENT_PATHS"] = json.dumps(task.downloaded_attachments)
+            job_params["ADK_ATTACHMENT_COUNT"] = str(len(task.downloaded_attachments))
 
         logger.info(f"Triggering orchestrator job {self.orchestrator_job_id} for task {task.issue_key}")
 
@@ -439,9 +539,24 @@ class IngestorService:
             tasks = self.poll_for_new_tasks()
             result["tasks_found"] = len(tasks)
 
-            # Trigger orchestrator for each task
+            # Download attachments and trigger orchestrator for each task
             for task in tasks:
                 try:
+                    # Download attachments if the task has any
+                    if task.has_attachments:
+                        attachment_result = self.download_task_attachments(
+                            task, dry_run=dry_run
+                        )
+                        if attachment_result.get("status") == "error":
+                            logger.warning(
+                                f"Attachment download failed for {task.issue_key}, "
+                                f"proceeding with orchestrator trigger anyway"
+                            )
+                            result.setdefault("attachment_errors", []).append({
+                                "issue_key": task.issue_key,
+                                "error": attachment_result.get("message"),
+                            })
+
                     trigger_result = self.trigger_orchestrator(task, dry_run=dry_run)
                     if trigger_result:
                         run_id, run_url = trigger_result
@@ -449,6 +564,7 @@ class IngestorService:
                             "issue_key": task.issue_key,
                             "run_id": run_id,
                             "run_url": run_url,
+                            "attachments_downloaded": len(task.downloaded_attachments),
                         })
                         result["tasks_triggered"] += 1
                     elif dry_run:

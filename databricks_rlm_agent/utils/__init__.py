@@ -5,6 +5,11 @@ from .docstring_parser import (
     parse_delegation_blob,
     DelegationBlobParseError,
 )
+from .jira_attachments import (
+    download_jira_attachments,
+    DEFAULT_JIRA_DOMAIN,
+    DEFAULT_TARGET_VOLUME,
+)
 from .state_helpers import (
     get_rlm_state,
     set_rlm_state,
@@ -41,6 +46,9 @@ __all__ = [
     "ParsedDelegationBlob",
     "parse_delegation_blob",
     "DelegationBlobParseError",
+    "download_jira_attachments",
+    "DEFAULT_JIRA_DOMAIN",
+    "DEFAULT_TARGET_VOLUME",
     "get_rlm_state",
     "set_rlm_state",
     # Temp key constants

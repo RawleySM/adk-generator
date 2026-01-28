@@ -306,6 +306,15 @@ def orchestrator_main():
         "ADK_FALLBACK_GEMINI_TO_LITELLM",
         os.environ.get("ADK_FALLBACK_GEMINI_TO_LITELLM", "true"),
     )
+    # Timeout configuration (used by run.py)
+    os.environ["ADK_TIMEOUT_SECONDS"] = _get_job_parameter(
+        "ADK_TIMEOUT_SECONDS",
+        os.environ.get("ADK_TIMEOUT_SECONDS", "3600"),
+    )
+    os.environ["ADK_EVENT_TIMEOUT_SECONDS"] = _get_job_parameter(
+        "ADK_EVENT_TIMEOUT_SECONDS",
+        os.environ.get("ADK_EVENT_TIMEOUT_SECONDS", "600"),
+    )
     executor_job_id_param = _get_job_parameter("ADK_EXECUTOR_JOB_ID", "")
     if executor_job_id_param:
         os.environ["ADK_EXECUTOR_JOB_ID"] = executor_job_id_param

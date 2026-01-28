@@ -55,6 +55,9 @@ from databricks_rlm_agent.tools import (
     repo_filename_search,
     metadata_keyword_search,
     get_repo_file,
+    # NOTE: get_Jira_ticket_attachments disabled - functionality is being implemented
+    # in the task ingestor (ingestor.py) via download_task_attachments()
+    # get_Jira_ticket_attachments,
 )
 
 # Import model factory for provider selection (Gemini vs LiteLLM)
@@ -185,6 +188,9 @@ databricks_analyst = LlmAgent(
         FunctionTool(repo_filename_search),   # Search repo file metadata
         FunctionTool(metadata_keyword_search),  # Search UC table metadata
         FunctionTool(get_repo_file),          # Download files from GitHub
+        # NOTE: get_Jira_ticket_attachments disabled - functionality is being implemented
+        # in the task ingestor (ingestor.py) via download_task_attachments()
+        # FunctionTool(get_Jira_ticket_attachments),  # Download Jira attachments to Volumes + registry
     ]
 )
 
@@ -304,6 +310,7 @@ __all__ = [
     "repo_filename_search",
     "metadata_keyword_search",
     "get_repo_file",
+    # "get_Jira_ticket_attachments",  # DISABLED - see ingestor.py download_task_attachments()
     # Plugin factories
     "get_logging_plugin",
     "get_telemetry_plugin",
