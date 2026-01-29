@@ -181,36 +181,66 @@ async def delegate_code_results(code: str, tool_context: ToolContext) -> dict[st
     tool_context.state[STATE_STAGE] = "delegated"
     tool_context.state[STATE_ACTIVE_ARTIFACT_ID] = artifact_id
 
-    # Create metadata entry in the artifact registry Delta table
+    # Create metadata entry in the artifact registry
+    # Use local registry in local mode, Spark/Delta registry in Databricks mode
     registry_created = False
-    try:
-        from pyspark.sql import SparkSession
-        from databricks_rlm_agent.artifact_registry import get_artifact_registry
+    run_mode = os.environ.get("ADK_RUN_MODE", "databricks")
 
-        spark = SparkSession.builder.getOrCreate()
-        registry = get_artifact_registry(spark, ensure_exists=False)
-        registry.create_artifact(
-            artifact_id=artifact_id,
-            session_id=session_id,
-            invocation_id=invocation_id,
-            iteration=new_iteration,
-            artifact_type="delegation_request",
-            sublm_instruction=parsed.sublm_instruction,
-            code_artifact_key=code_artifact_key,
-            metadata={
-                "code_length": len(parsed.agent_code),
-                "has_instruction": parsed.has_instruction,
-            },
-        )
-        registry_created = True
-        logger.info(f"Created artifact registry entry: {artifact_id}")
-        print(f"[DELEGATE_CODE_RESULTS] Created registry entry: {artifact_id}")
-    except ImportError:
-        # Not in Databricks environment - registry will be created by job_builder
-        logger.debug("Spark not available - skipping registry creation")
-    except Exception as e:
-        logger.warning(f"Could not create artifact registry entry: {e}")
-        print(f"[DELEGATE_CODE_RESULTS] Warning: Could not create registry entry: {e}")
+    if run_mode == "local":
+        # Use local DuckDB registry
+        try:
+            from databricks_rlm_agent.artifact_registry_local import get_local_artifact_registry
+
+            registry = get_local_artifact_registry(ensure_exists=True)
+            registry.create_artifact(
+                artifact_id=artifact_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+                iteration=new_iteration,
+                artifact_type="delegation_request",
+                sublm_instruction=parsed.sublm_instruction,
+                code_artifact_key=code_artifact_key,
+                metadata={
+                    "code_length": len(parsed.agent_code),
+                    "has_instruction": parsed.has_instruction,
+                },
+            )
+            registry_created = True
+            logger.info(f"Created local artifact registry entry: {artifact_id}")
+            print(f"[DELEGATE_CODE_RESULTS] Created local registry entry: {artifact_id}")
+        except Exception as e:
+            logger.warning(f"Could not create local artifact registry entry: {e}")
+            print(f"[DELEGATE_CODE_RESULTS] Warning: Could not create local registry entry: {e}")
+    else:
+        # Use Spark/Delta registry
+        try:
+            from pyspark.sql import SparkSession
+            from databricks_rlm_agent.artifact_registry import get_artifact_registry
+
+            spark = SparkSession.builder.getOrCreate()
+            registry = get_artifact_registry(spark, ensure_exists=False)
+            registry.create_artifact(
+                artifact_id=artifact_id,
+                session_id=session_id,
+                invocation_id=invocation_id,
+                iteration=new_iteration,
+                artifact_type="delegation_request",
+                sublm_instruction=parsed.sublm_instruction,
+                code_artifact_key=code_artifact_key,
+                metadata={
+                    "code_length": len(parsed.agent_code),
+                    "has_instruction": parsed.has_instruction,
+                },
+            )
+            registry_created = True
+            logger.info(f"Created artifact registry entry: {artifact_id}")
+            print(f"[DELEGATE_CODE_RESULTS] Created registry entry: {artifact_id}")
+        except ImportError:
+            # Not in Databricks environment - registry will be created by job_builder
+            logger.debug("Spark not available - skipping registry creation")
+        except Exception as e:
+            logger.warning(f"Could not create artifact registry entry: {e}")
+            print(f"[DELEGATE_CODE_RESULTS] Warning: Could not create registry entry: {e}")
 
     logger.info(
         f"Delegation prepared: artifact_id={artifact_id}, "

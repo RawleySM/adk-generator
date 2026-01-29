@@ -1,0 +1,31 @@
+{
+  "name": "test_get_repo_file_full_filepath",
+  "description": "Add full_filepath column to repos.files and test get_repo_file.py download functionality",
+  "tasks": [
+    {
+      "task_key": "add_filepath_columns",
+      "description": "Add relative_backslash and full_filepath columns to silo_dev_rs.repos.files",
+      "existing_cluster_id": "1115-120035-jyzgoasz",
+      "spark_python_task": {
+        "python_file": "dbfs:/tmp/spendmend/add_filepath_columns.py"
+      },
+      "timeout_seconds": 600
+    },
+    {
+      "task_key": "test_weburl_downloads",
+      "description": "Test get_repo_file.py download functionality using full_filepath from repos.files",
+      "depends_on": [
+        {
+          "task_key": "add_filepath_columns"
+        }
+      ],
+      "existing_cluster_id": "1115-120035-jyzgoasz",
+      "spark_python_task": {
+        "python_file": "dbfs:/tmp/spendmend/test_weburl_get_repo_file.py"
+      },
+      "timeout_seconds": 900
+    }
+  ],
+  "max_concurrent_runs": 1,
+  "format": "MULTI_TASK"
+}

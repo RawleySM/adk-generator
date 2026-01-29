@@ -1,0 +1,12 @@
+[
+  {
+    "ISSUEKEY": "DEV-6128",
+    "source_table": "dev",
+    "pr_url": "https://github.com/SpendMend/SM_Portal/pull/3800"
+  },
+  {
+    "ISSUEKEY": "DEV-6108",
+    "source_table": "dev",
+    "pr_url": "https://github.com/SpendMend/Master-Vendor-Alignment/pull/342"
+  }
+]

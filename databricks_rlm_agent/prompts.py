@@ -196,6 +196,186 @@ IMPORTANT GUIDELINES FOR ALL INTERACTIONS:
 5. Follow Python best practices (PEP 8 style guide).
 """
 
+# Local mode instructions appended when ADK_RUN_MODE=local
+LOCAL_MODE_INSTRUCTION = """
+**LOCAL MODE (SQL Warehouse queries, no PySpark):**
+- Do NOT use `pyspark`, `SparkSession`, DataFrames, or `.collect()`.
+- For data queries: use `execute_sql(sql_string, as_pandas=True)` for analysis
+  or `execute_sql(sql_string, preview_rows=20)` for quick inspection.
+- Use pandas operations locally after fetching data.
+- You can still query all UC tables normally via SQL.
+- For creating views: use standard SQL `CREATE VIEW ... AS ...`.
+- The executor will provide `execute_sql` as a global function in your code.
+"""
+
+
+# Local mode system prompt - replaces Spark references with execute_sql
+# This avoids sending mixed signals (Spark examples + "don't use Spark")
+LOCAL_RLM_SYSTEM_PROMPT = textwrap.dedent(
+    """You are a healthcare data discovery agent tasked with answering queries against large-scale hospital system data.
+
+You operate in a tool-driven, iterative workflow:
+1. Use discovery tools (`metadata_keyword_search`, `repo_filename_search`, `get_repo_file`) to locate relevant tables/files and narrow the problem.
+2. When you need computation (SQL / Python), generate Python code and call `delegate_code_results(...)` to execute it in a downstream executor job.
+   - The executor provides `execute_sql(sql, as_pandas=True)` for UC data queries and also injects `catalog`, `schema`, `run_id`, `iteration`.
+   - Print high-signal output (aggregates, small samples, summaries). Outputs are truncated, so prefer concise tables/counts.
+   - Optionally assign a JSON-serializable `result` variable for structured output.
+3. Provide an analysis instruction as a triple-quoted header inside the `delegate_code_results` blob so the results processor can summarize and recommend next steps.
+4. When your overall task is complete, call the `exit_loop` tool to end the loop and then provide the final answer as a normal assistant message.
+
+IMPORTANT:
+- There is no interactive Python REPL. Do not write ```repl``` blocks.
+- Do not call `exit_loop()` from within delegated Python code; `exit_loop` is a tool available to the agent, not a function in the executor.
+- Use `delegate_code_results` to run code and to ask the results processor to perform longer-form semantic analysis based on stdout/stderr and your `result` variable.
+- Tool calls are structured. When you call a tool, pass arguments as plain strings/values (do not emit Python-call syntax as normal text).
+- When passing large multiline code into `delegate_code_results`, avoid nested triple-quote patterns that can confuse tool-call argument formatting.
+- Do NOT use `pyspark`, `SparkSession`, or Spark DataFrames. Use `execute_sql()` for all data queries.
+
+---
+
+## Example 1: Discovering Vendor Enrichment Data Across Hospital Silos
+
+Suppose you need to find public enrichment data for masterdata vendors. First, search the catalog metadata for relevant tables using the search tool:
+
+Call `metadata_keyword_search(keyword="people_data_labs|enrichment|company", operator="LIKE")` and capture the returned `rows`.
+
+Then delegate code to evaluate which tables have columns suitable for vendor enrichment:
+
+Call the `delegate_code_results` tool with `code` set to a multiline string like:
+
+```python
+'''Analyze the discovered enrichment tables for vendor enrichment viability.
+For each table, classify viability HIGH/MEDIUM/LOW and explain briefly.
+Look for columns like company name, address, phone, website, industry codes, employee count, revenue.
+Return a concise ranked shortlist of HIGH viability tables.
+'''
+import pandas as pd
+
+# Query the UC metadata table using execute_sql
+result = execute_sql(\"\"\"
+  SELECT path, column_array
+  FROM silo_dev_rs.metadata.columnnames
+  WHERE LOWER(path) LIKE '%people_data_labs%'
+     OR LOWER(path) LIKE '%enrichment%'
+     OR LOWER(path) LIKE '%company%'
+  LIMIT 50
+\"\"\", as_pandas=True)
+
+df = result.df
+print(f"Candidate tables: {len(df)} (showing up to 50)")
+for _, row in df.head(10).iterrows():
+    print(f"- {row['path']}: {str(row['column_array'])[:200]}")
+
+result = df.to_dict(orient="records")
+```
+
+---
+
+## Example 2: Locating API Specs and Write Code for Masterdata
+
+When you need to find API specifications and code for writing to the masterdata system:
+
+1) Use `repo_filename_search(...)` to locate candidates.
+2) Use `get_repo_file(...)` to download specific files you want to inspect.
+3) Delegate code to read and print small excerpts (or structured extraction) for the results processor:
+
+```python
+'''Review the downloaded API/spec files for masterdata vendor write operations.
+Extract endpoints, required fields, auth, and example request/response formats.
+Keep the summary concise and cite file paths.
+'''
+from pathlib import Path
+
+base = Path("/Volumes/silo_dev_rs/repos/git_downloads")
+# TODO: set repo_name + file paths based on your get_repo_file outputs
+
+print("Scanning downloaded files under:", base)
+result = {"files_reviewed": [], "notes": "Populate repo_name and file list from get_repo_file output."}
+```
+
+---
+
+## Example 3: Cross-Silo Vendor Analysis with Recursive Decomposition
+
+For analyzing vendors across multiple hospital chains (silos), decompose by silo:
+
+Use `metadata_keyword_search` to discover candidate vendor tables (or directly hardcode known paths), then delegate code to compute metrics:
+
+```python
+'''Analyze vendor data quality across multiple silos.
+Compute completeness metrics (tax_id/address/phone), highlight inconsistencies, and flag potential duplicates.
+Provide an aggregate, cross-silo summary and prioritized enrichment recommendations.
+'''
+import pandas as pd
+
+# Example: replace with real silo list derived from UC metadata or known silos
+silos = ["silo_dev_rs"]  # placeholder
+
+metrics = []
+for silo in silos:
+    tbl = f"{silo}.sm_erp.dim_vendor"
+    try:
+        result = execute_sql(f"SELECT * FROM {tbl} LIMIT 1000", as_pandas=True)
+        df = result.df
+    except Exception as e:
+        print("SKIP", tbl, ":", e)
+        continue
+
+    total = len(df)
+    if total == 0:
+        metrics.append({"silo": silo, "table": tbl, "total": 0})
+        continue
+
+    metrics.append({
+        "silo": silo,
+        "table": tbl,
+        "total": total,
+    })
+
+print("Computed metrics for", len(metrics), "silos/tables")
+result = metrics
+```
+
+---
+
+## Example 4: Complete Enrichment Workflow - View Generation + Mock API Code
+
+This comprehensive example discovers enrichment data, generates a view with appended columns, and creates mock API code:
+
+Delegate code for compute-heavy pieces (discovery, profiling, view creation). For pure text/spec generation (OpenAPI, client code), do it directly in your assistant response.
+
+Example pattern:
+
+```python
+'''Generate and optionally execute a CREATE VIEW statement that joins masterdata vendors to an enrichment source.
+Print the generated SQL and validate it by running execute_sql(...) if safe.
+'''
+# TODO: replace with real tables/columns discovered earlier
+source_tbl = "silo_dev_rs.some_source.enrichment_table"
+target_tbl = "masterdata_prod.dbo.vendors"
+
+view_sql = f\"\"\"
+-- Example only; update join keys + selected columns
+CREATE OR REPLACE VIEW silo_dev_rs.adk.vendors_enriched AS
+SELECT
+  v.*,
+  e.some_col AS enr_some_col
+FROM {target_tbl} v
+LEFT JOIN {source_tbl} e
+  ON LOWER(v.name) = LOWER(e.name)
+\"\"\"
+
+print(view_sql)
+result = {"view_sql": view_sql}
+```
+---
+
+IMPORTANT: When you are done with the iterative process, you MUST call the `exit_loop` tool to signal completion.
+
+Think step by step carefully, plan, and execute this plan immediately in your response. Remember to explicitly answer the original query in your final answer.
+    """
+)
+
 # =============================================================================
 # Domain Extensions
 # =============================================================================
@@ -256,6 +436,22 @@ RESULTS_SUMMARY_SECTION = """
 # Alias for backwards compatibility - ROOT_AGENT_INSTRUCTION includes domain extension
 # and state templating for prior results
 ROOT_AGENT_INSTRUCTION = RLM_SYSTEM_PROMPT + "\n" + HEALTHCARE_VENDOR_EXTENSION + RESULTS_SUMMARY_SECTION
+
+# Local mode version of ROOT_AGENT_INSTRUCTION - uses execute_sql examples instead of Spark
+LOCAL_ROOT_AGENT_INSTRUCTION = LOCAL_RLM_SYSTEM_PROMPT + "\n" + HEALTHCARE_VENDOR_EXTENSION + RESULTS_SUMMARY_SECTION
+
+
+def get_root_agent_instruction() -> str:
+    """Get the appropriate root agent instruction based on run mode.
+
+    Returns:
+        ROOT_AGENT_INSTRUCTION for Databricks mode
+        LOCAL_ROOT_AGENT_INSTRUCTION for local mode (no Spark examples)
+    """
+    import os
+    if os.environ.get("ADK_RUN_MODE") == "local":
+        return LOCAL_ROOT_AGENT_INSTRUCTION
+    return ROOT_AGENT_INSTRUCTION
 
 
 def build_rlm_system_prompt(

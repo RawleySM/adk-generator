@@ -1,0 +1,18 @@
+{
+  "name": "test_github_download_auth_isolation",
+  "description": "Test GitHub download methods to isolate auth issues (dotenv vs Databricks secrets)",
+  "tasks": [
+    {
+      "task_key": "test_github_auth",
+      "description": "Run auth isolation test comparing dotenv token vs Databricks secrets token",
+      "existing_cluster_id": "1115-120035-jyzgoasz",
+      "spark_python_task": {
+        "python_file": "dbfs:/tmp/spendmend/test_download_methods.py",
+        "parameters": []
+      },
+      "timeout_seconds": 600
+    }
+  ],
+  "max_concurrent_runs": 1,
+  "format": "MULTI_TASK"
+}

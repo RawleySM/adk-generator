@@ -636,6 +636,55 @@ Explore the Spendmend codebase and Unity Catalog metadata to identify documentat
 
 
 # =============================================================================
+# LEVEL 17 - NPPES Data Investigation & Fix (DATA-1185)
+# =============================================================================
+TASK_LEVEL_17 = TestTask(
+    difficulty=17,
+    issue_key="DATA-1185",
+    summary="RX - NPPES Investigate & Fix",
+    description="""
+Investigate and fix issues with NPPES (National Plan and Provider Enumeration System) data in the RX/Pharmacy domain.
+
+**IMPORTANT:** You can only create new views with the Unity Catalog schema silo_dev_rs.test. You must not write artifacts or create views outside the silo_dev_rs catalog.
+
+**Context:**
+This is a bug ticket under the GenAI Pharmacy administrative tasks epic (GAP-83). NPPES is the CMS database containing National Provider Identifiers (NPIs) used to identify healthcare providers.
+
+**Steps:**
+1. Use metadata_keyword_search to locate NPPES-related tables in the catalog (search for "nppes", "npi", "provider").
+2. Explore the schema of discovered NPPES tables to understand data structure.
+3. Query sample data to identify potential data quality issues (nulls, duplicates, format inconsistencies).
+4. Cross-reference with RX/Pharmacy domain tables to understand how NPPES data is used.
+5. Search the codebase for NPPES-related ETL or transformation logic using repo_filename_search.
+6. Document findings and propose fixes for any identified issues.
+
+**Deliverables:**
+- A diagnostic report saved to `/Volumes/silo_dev_rs/repos/test_dev/nppes_investigation_report.md` containing:
+    - List of NPPES-related tables discovered in the catalog.
+    - Schema analysis and sample data from key tables.
+    - Identified data quality issues (if any).
+    - Relationship mapping between NPPES and RX/Pharmacy tables.
+    - Code references for NPPES ETL/transformation logic.
+    - Recommended fixes or improvements.
+
+**Constraints:**
+- Perform at least 10 turns of exploration before finalizing.
+- Focus on data lineage and quality issues.
+- Write the final report to the specified volume path.
+
+**Acceptance Criteria:**
+- Report exists in the volume.
+- Report contains specific examples of NPPES data and any issues found.
+- Clear mapping between NPPES provider data and pharmacy domain usage.
+""",
+    priority="Medium",
+    story_points=2.0,
+    expected_tables=["silo_dev_rs.metadata.columnnames"],
+    delegation_benefit="Summarize NPPES data quality findings and cross-domain relationships."
+)
+
+
+# =============================================================================
 # Task Registry
 # =============================================================================
 TASKS = {
@@ -655,6 +704,7 @@ TASKS = {
     14: TASK_LEVEL_14,
     15: TASK_LEVEL_15,
     16: TASK_LEVEL_16,
+    17: TASK_LEVEL_17,
 }
 
 

@@ -1,0 +1,129 @@
+{
+  "found": 20,
+  "updated": 20,
+  "not_found": 3037,
+  "errors": 0,
+  "skipped_no_mapping": 0,
+  "details": [
+    {
+      "issue_key": "DEV-4726",
+      "pr_number": 343,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-3169",
+      "pr_number": 97,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-3126",
+      "pr_number": 83,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-2980",
+      "pr_number": 22,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-5153",
+      "pr_number": 380,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-5127",
+      "pr_number": 377,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-4723",
+      "pr_number": 342,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-4572",
+      "pr_number": 333,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-5248",
+      "pr_number": 363,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-5013",
+      "pr_number": 354,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-5503",
+      "pr_number": 381,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-5050",
+      "pr_number": 355,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-4779",
+      "pr_number": 349,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-4520",
+      "pr_number": 323,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-4003",
+      "pr_number": 284,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-3845",
+      "pr_number": 274,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-3629",
+      "pr_number": 248,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-3593",
+      "pr_number": 241,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-4478",
+      "pr_number": 352,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    },
+    {
+      "issue_key": "DEV-4477",
+      "pr_number": 339,
+      "repo": "SpendMend/SMChat",
+      "state": "closed"
+    }
+  ]
+}

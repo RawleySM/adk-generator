@@ -1,0 +1,24 @@
+{
+  "DATA": [
+    "SpendMend/SpendMend-Data-Explorer"
+  ],
+  "DEV": [
+    "SpendMend/SMChat"
+  ],
+  "GAP": [
+    "SpendMend/GenAIPharmacy"
+  ],
+  "RI": [
+    "SpendMend/RebateInsight-Web",
+    "SpendMend/RebateInsight-Functions"
+  ],
+  "TRL": [
+    "SpendMend/TrullaDirectEngineering"
+  ],
+  "TRUL": [
+    "SpendMend/TrullaNew"
+  ],
+  "TRULSW": [
+    "SpendMend/TrullaNew"
+  ]
+}

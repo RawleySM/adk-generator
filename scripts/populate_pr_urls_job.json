@@ -1,0 +1,27 @@
+{
+  "name": "populate_jira_pr_urls",
+  "description": "Populates pr_url column in jira_pr_numbers by calling JIRA Development API. Includes exponential backoff for rate limiting and stops after 10 consecutive failures (daily limit detection).",
+  "tasks": [
+    {
+      "task_key": "populate_pr_urls",
+      "description": "Fetch PR URLs from JIRA API and update jira_pr_numbers table",
+      "existing_cluster_id": "1115-120035-jyzgoasz",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/rstanhope@spendmend.com/databricks_populate_pr_urls",
+        "source": "WORKSPACE"
+      },
+      "timeout_seconds": 14400,
+      "max_retries": 0
+    }
+  ],
+  "timeout_seconds": 14400,
+  "max_concurrent_runs": 1,
+  "email_notifications": {
+    "on_failure": ["rstanhope@spendmend.com"],
+    "on_success": ["rstanhope@spendmend.com"]
+  },
+  "tags": {
+    "project": "jira-pr-urls",
+    "type": "etl"
+  }
+}

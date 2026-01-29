@@ -21,7 +21,11 @@ Control Flow Tools:
 from .save_artifact_to_volumes import save_artifact_to_volumes
 from .metadata_keyword_search import metadata_keyword_search
 from .repo_filename_search import repo_filename_search
-from .get_repo_file import get_repo_file
+from .get_repo_file import (
+    get_repo_file,
+    download_single_file_from_full_filepath,
+    download_files_from_full_filepaths,
+)
 # NOTE: get_Jira_ticket_attachments disabled - functionality is being implemented
 # in the task ingestor (ingestor.py) via download_task_attachments()
 # from .get_Jira_ticket_attachments import get_Jira_ticket_attachments
@@ -37,6 +41,8 @@ __all__ = [
     "repo_filename_search",
     # File download tools
     "get_repo_file",
+    "download_single_file_from_full_filepath",
+    "download_files_from_full_filepaths",
     # "get_Jira_ticket_attachments",  # DISABLED - see ingestor.py download_task_attachments()
     # Control flow tools
     "exit_loop",

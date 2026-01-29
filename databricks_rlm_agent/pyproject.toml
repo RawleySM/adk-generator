@@ -11,6 +11,10 @@ dependencies = [
     "requests>=2.31.0",
     "litellm>=1.0.0",  # LiteLLM for multi-provider model support
     "tiktoken>=0.5.0",  # Token estimation for telemetry (cl100k_base encoding)
+    # Local mode dependencies
+    "duckdb>=0.9.0",  # Embedded SQL database
+    "pyarrow>=14.0.0",  # Arrow stream parsing for pandas
+    "pandas>=2.0.0",  # DataFrame support
     # Note: pyspark is provided by Databricks Runtime, not packaged in wheel
 ]
 

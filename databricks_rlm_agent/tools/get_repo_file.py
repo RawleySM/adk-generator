@@ -133,6 +133,295 @@ def _is_raw_github_url(filepath: str) -> bool:
     return filepath.startswith("https://raw.githubusercontent.com/")
 
 
+def _is_full_filepath(filepath: str) -> bool:
+    """
+    Check if the filepath is in full_filepath format: <repo_name>/<relative_path>.
+    
+    Full filepath format uses "/" for all path separators and includes the repo name
+    as the first component. Example: "Master-Vendor-Alignment/src/etl/loader.py"
+    """
+    if not filepath or "/" not in filepath:
+        return False
+    # Must have at least repo_name/filename
+    parts = filepath.split("/")
+    return len(parts) >= 2
+
+
+def _parse_full_filepath(full_filepath: str, branch: str = DEFAULT_BRANCH) -> dict:
+    """
+    Parse a full_filepath into components.
+    
+    Example: "Master-Vendor-Alignment/src/etl/loader.py"
+    
+    Returns:
+        dict with keys: repo_name, filepath, filename, url, branch
+    """
+    parts = full_filepath.split("/")
+    if len(parts) < 2:
+        raise ValueError(f"Invalid full_filepath format: {full_filepath}")
+    
+    repo_name = parts[0]
+    relative_path = "/".join(parts[1:])  # Everything after repo_name
+    filename = parts[-1]
+    
+    # Build the raw GitHub URL
+    url = f"https://raw.githubusercontent.com/{DEFAULT_ORG}/{repo_name}/{branch}/{relative_path}"
+    
+    return {
+        "repo_name": repo_name,
+        "filepath": relative_path,
+        "filename": filename,
+        "url": url,
+        "branch": branch
+    }
+
+
+def download_single_file_from_full_filepath(
+    full_filepath: str,
+    branch: str = DEFAULT_BRANCH,
+    target_volume: str = DEFAULT_TARGET_VOLUME
+) -> dict:
+    """
+    Download a single file using full_filepath format.
+    
+    This is a convenience function for downloading a single file when you have
+    the full_filepath from silo_dev_rs.repos.files.
+    
+    Args:
+        full_filepath: Path in format "<repo_name>/<relative_path>", e.g.,
+                       "Master-Vendor-Alignment/src/etl/loader.py"
+        branch: Git branch (default: "main")
+        target_volume: Volume path for downloaded file
+    
+    Returns:
+        dict with download result including success status
+    """
+    token = _get_github_token()
+    if not token:
+        return {
+            "success": False,
+            "error": "GitHub token not found. Please set GITHUB_TOKEN environment variable or configure Databricks secrets."
+        }
+    
+    try:
+        parsed = _parse_full_filepath(full_filepath, branch)
+        url = parsed["url"]
+        
+        logger.info(f"Downloading single file from full_filepath: {full_filepath}")
+        
+        result = _download_from_raw_url(
+            token=token,
+            url=url,
+            target_volume=target_volume
+        )
+        
+        # Add full_filepath to result for traceability
+        result["full_filepath"] = full_filepath
+        
+        return result
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "full_filepath": full_filepath,
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "full_filepath": full_filepath,
+            "error": f"Unexpected error: {str(e)}"
+        }
+
+
+def download_files_from_full_filepaths(
+    full_filepaths: list,
+    branch: str = DEFAULT_BRANCH,
+    target_volume: str = DEFAULT_TARGET_VOLUME,
+    continue_on_error: bool = True
+) -> dict:
+    """
+    Download multiple files using full_filepath format with graceful error handling.
+    
+    This function downloads files from GitHub using the full_filepath format
+    (<repo_name>/<relative_path>). Failed downloads are recorded but don't stop
+    the batch unless continue_on_error=False.
+    
+    Args:
+        full_filepaths: List of paths in format "<repo_name>/<relative_path>"
+        branch: Git branch (default: "main")
+        target_volume: Volume path for downloaded files
+        continue_on_error: If True (default), continue downloading even if some files fail.
+                          If False, stop on first error.
+    
+    Returns:
+        dict with keys:
+            - status: "success", "partial", or "error"
+            - total_requested: Number of files requested
+            - successful_downloads: Number of files downloaded
+            - failed_downloads: Number of files that failed
+            - files: List of individual file results
+            - errors_summary: Summary of error types encountered
+    """
+    if not full_filepaths:
+        return {
+            "status": "error",
+            "message": "No full_filepaths provided."
+        }
+    
+    if not isinstance(full_filepaths, list):
+        full_filepaths = [full_filepaths]
+    
+    # Enforce batch limit
+    if len(full_filepaths) > MAX_FILES_PER_BATCH:
+        return {
+            "status": "error",
+            "message": f"Too many files requested ({len(full_filepaths)}). Maximum is {MAX_FILES_PER_BATCH} files per batch.",
+            "limit": MAX_FILES_PER_BATCH,
+            "requested": len(full_filepaths)
+        }
+    
+    token = _get_github_token()
+    if not token:
+        return {
+            "status": "error",
+            "message": "GitHub token not found. Please set GITHUB_TOKEN environment variable or configure Databricks secrets."
+        }
+    
+    logger.info(f"[FULL_FILEPATH MODE] Starting download of {len(full_filepaths)} files")
+    
+    results = {
+        "status": "success",
+        "mode": "full_filepath",
+        "total_requested": len(full_filepaths),
+        "successful_downloads": 0,
+        "failed_downloads": 0,
+        "files": [],
+        "output_directory": target_volume,
+        "errors_summary": {}
+    }
+    
+    job_start_time = time.perf_counter()
+    
+    for i, full_filepath in enumerate(full_filepaths):
+        if i > 0:
+            time.sleep(DOWNLOAD_DELAY_SECONDS)
+        
+        full_filepath = str(full_filepath).strip()
+        
+        logger.info(f"[{i+1}/{len(full_filepaths)}] Processing: {full_filepath}")
+        
+        try:
+            parsed = _parse_full_filepath(full_filepath, branch)
+            url = parsed["url"]
+            
+            file_result = _download_from_raw_url(
+                token=token,
+                url=url,
+                target_volume=target_volume
+            )
+            
+            file_result["full_filepath"] = full_filepath
+            
+            if file_result.get("success"):
+                results["successful_downloads"] += 1
+                logger.info(f"  SUCCESS: {file_result.get('output_path')} ({file_result.get('bytes_downloaded')} bytes)")
+            else:
+                results["failed_downloads"] += 1
+                error = file_result.get("error", "Unknown error")
+                logger.warning(f"  FAILED: {error}")
+                
+                # Track error types for summary
+                error_type = error.split(":")[0] if ":" in error else error
+                results["errors_summary"][error_type] = results["errors_summary"].get(error_type, 0) + 1
+                
+                if not continue_on_error:
+                    results["status"] = "error"
+                    results["message"] = f"Stopped after error on file {i+1}: {error}"
+                    results["files"].append({
+                        "full_filepath": full_filepath,
+                        "success": False,
+                        "error": error
+                    })
+                    break
+            
+            results["files"].append({
+                "full_filepath": full_filepath,
+                "repo_name": file_result.get("repo_name"),
+                "filepath": file_result.get("filepath"),
+                "filename": file_result.get("filename"),
+                "success": file_result.get("success"),
+                "output_path": file_result.get("output_path") if file_result.get("success") else None,
+                "bytes": file_result.get("bytes_downloaded") if file_result.get("success") else None,
+                "error": file_result.get("error") if not file_result.get("success") else None
+            })
+            
+        except ValueError as e:
+            results["failed_downloads"] += 1
+            error_msg = str(e)
+            logger.warning(f"  PARSE ERROR: {error_msg}")
+            
+            results["errors_summary"]["ParseError"] = results["errors_summary"].get("ParseError", 0) + 1
+            
+            results["files"].append({
+                "full_filepath": full_filepath,
+                "success": False,
+                "error": error_msg
+            })
+            
+            if not continue_on_error:
+                results["status"] = "error"
+                results["message"] = f"Stopped after parse error: {error_msg}"
+                break
+                
+        except Exception as e:
+            results["failed_downloads"] += 1
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.warning(f"  EXCEPTION: {error_msg}")
+            
+            results["errors_summary"]["UnexpectedError"] = results["errors_summary"].get("UnexpectedError", 0) + 1
+            
+            results["files"].append({
+                "full_filepath": full_filepath,
+                "success": False,
+                "error": error_msg
+            })
+            
+            if not continue_on_error:
+                results["status"] = "error"
+                results["message"] = f"Stopped after exception: {error_msg}"
+                break
+    
+    # Calculate total time
+    job_end_time = time.perf_counter()
+    total_time = round(job_end_time - job_start_time, 2)
+    results["timing_seconds"] = total_time
+    
+    # Determine overall status
+    if results["failed_downloads"] == 0:
+        results["status"] = "success"
+        results["message"] = (
+            f"[FULL_FILEPATH MODE] Successfully downloaded all {results['successful_downloads']} files "
+            f"to {results['output_directory']} in {total_time}s"
+        )
+    elif results["successful_downloads"] == 0:
+        results["status"] = "error"
+        results["message"] = (
+            f"[FULL_FILEPATH MODE] Failed to download all {results['total_requested']} files. "
+            f"Check individual file errors for details."
+        )
+    else:
+        results["status"] = "partial"
+        results["message"] = (
+            f"[FULL_FILEPATH MODE] Downloaded {results['successful_downloads']} of {results['total_requested']} files "
+            f"({results['failed_downloads']} failed). Check individual file errors."
+        )
+    
+    logger.info(f"[FULL_FILEPATH MODE] Batch complete: {results['message']}")
+    
+    return results
+
+
 def _parse_raw_github_url(url: str) -> dict:
     """
     Parse a raw GitHub URL into components.
@@ -170,9 +459,48 @@ def _parse_raw_github_url(url: str) -> dict:
     }
 
 
+def _decode_token_if_base64(token: str) -> str:
+    """
+    Decode token if it's base64 encoded.
+    
+    GitHub PATs start with 'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', or 'github_pat_'.
+    If the token doesn't start with these prefixes, try base64 decoding.
+    
+    This handles cases where tokens are stored base64 encoded in Databricks secrets.
+    
+    Args:
+        token: The token string to check/decode.
+        
+    Returns:
+        Decoded token if base64 encoded, otherwise original token.
+    """
+    import base64
+    
+    # Valid GitHub PAT prefixes
+    valid_prefixes = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
+    
+    # Already in correct format
+    if token.startswith(valid_prefixes):
+        return token
+    
+    # Try base64 decode
+    try:
+        decoded = base64.b64decode(token).decode('utf-8')
+        if decoded.startswith(valid_prefixes):
+            logger.info("GitHub token was base64 encoded, decoded successfully")
+            return decoded
+    except Exception:
+        pass
+    
+    # Return original if decoding fails
+    return token
+
+
 def _get_github_token() -> Optional[str]:
     """
     Retrieves GitHub token from Databricks secrets or environment.
+    
+    Handles base64 encoded tokens that may be stored in Databricks secrets.
     
     Returns:
         GitHub Personal Access Token or None if not found.
@@ -180,7 +508,8 @@ def _get_github_token() -> Optional[str]:
     # First check environment variable
     token = os.environ.get("GITHUB_TOKEN")
     if token:
-        return token
+        # Decode if needed (in case env var was set from encoded source)
+        return _decode_token_if_base64(token)
     
     # Try Databricks secrets
     try:
@@ -193,21 +522,21 @@ def _get_github_token() -> Optional[str]:
             try:
                 secret = client.secrets.get_secret(scope=scope, key="github-token")
                 if secret and secret.value:
-                    return secret.value
+                    return _decode_token_if_base64(secret.value)
             except Exception:
                 pass
             # Try pat key
             try:
                 secret = client.secrets.get_secret(scope=scope, key="pat")
                 if secret and secret.value:
-                    return secret.value
+                    return _decode_token_if_base64(secret.value)
             except Exception:
                 pass
             # Try github_token key (alternative naming)
             try:
                 secret = client.secrets.get_secret(scope=scope, key="github_token")
                 if secret and secret.value:
-                    return secret.value
+                    return _decode_token_if_base64(secret.value)
             except Exception:
                 pass
     except Exception as e:
@@ -219,7 +548,8 @@ def _get_github_token() -> Optional[str]:
 def _download_from_raw_url(
     token: str,
     url: str,
-    target_volume: str = DEFAULT_TARGET_VOLUME
+    target_volume: str = DEFAULT_TARGET_VOLUME,
+    fallback_branches: list = None
 ) -> dict:
     """
     Downloads a file directly from a raw GitHub URL.
@@ -227,13 +557,20 @@ def _download_from_raw_url(
     This is the PREFERRED download method when the URL is already known,
     as it bypasses all filepath parsing ambiguity.
     
+    If the initial URL returns 404, will try fallback_branches (e.g., ["master"])
+    by substituting the branch in the URL.
+    
     Returns:
         Dict with download results including success status.
     """
+    if fallback_branches is None:
+        fallback_branches = ["master"]  # Default fallback when main fails
+    
     parsed = _parse_raw_github_url(url)
     repo_name = parsed["repo_name"]
     filepath = parsed["filepath"]
     filename = parsed["filename"]
+    original_branch = parsed["branch"]
     is_binary = _is_binary_file(filename)
     
     result = {
@@ -241,7 +578,7 @@ def _download_from_raw_url(
         "filepath": filepath,
         "filename": filename,
         "url": url,
-        "branch": parsed["branch"],
+        "branch": original_branch,
         "is_binary": is_binary,
         "url_mode": True  # Flag indicating URL was used directly
     }
@@ -297,8 +634,69 @@ def _download_from_raw_url(
                 result["output_path"] = output_path
                 
             elif response.status_code == 404:
+                # Try fallback branches before giving up
+                for alt_branch in fallback_branches:
+                    if alt_branch == original_branch:
+                        continue  # Skip if same as original
+                    
+                    # Build URL with alternate branch
+                    alt_url = url.replace(f"/{original_branch}/", f"/{alt_branch}/")
+                    logger.info(f"Trying fallback branch '{alt_branch}': {alt_url}")
+                    
+                    try:
+                        with requests.get(alt_url, headers=headers, stream=True, timeout=60) as alt_response:
+                            if alt_response.status_code == 200:
+                                # Success with fallback branch!
+                                alt_chunks = []
+                                alt_bytes_downloaded = 0
+                                
+                                for chunk in alt_response.iter_content(chunk_size=8192, decode_unicode=False):
+                                    if chunk:
+                                        alt_chunks.append(chunk)
+                                        alt_bytes_downloaded += len(chunk)
+                                
+                                alt_download_time = time.perf_counter() - start_time
+                                alt_raw_bytes = b''.join(alt_chunks)
+                                
+                                if not target_volume.endswith('/'):
+                                    target_volume = target_volume + '/'
+                                
+                                output_path = os.path.join(target_volume, repo_name, filepath)
+                                output_dir = os.path.dirname(output_path)
+                                os.makedirs(output_dir, exist_ok=True)
+                                
+                                alt_write_start = time.perf_counter()
+                                
+                                if is_binary:
+                                    with open(output_path, 'wb') as f:
+                                        f.write(alt_raw_bytes)
+                                else:
+                                    try:
+                                        content = alt_raw_bytes.decode('utf-8')
+                                    except UnicodeDecodeError:
+                                        content = alt_raw_bytes.decode('latin-1')
+                                    
+                                    with open(output_path, 'w', encoding='utf-8') as f:
+                                        f.write(content)
+                                
+                                alt_write_time = time.perf_counter() - alt_write_start
+                                
+                                result["success"] = True
+                                result["bytes_downloaded"] = alt_bytes_downloaded
+                                result["download_time_seconds"] = round(alt_download_time, 4)
+                                result["write_time_seconds"] = round(alt_write_time, 4)
+                                result["output_path"] = output_path
+                                result["branch"] = alt_branch  # Update to actual branch used
+                                result["url"] = alt_url
+                                
+                                return result  # Success with fallback!
+                    except Exception as fallback_e:
+                        logger.debug(f"Fallback branch '{alt_branch}' failed: {fallback_e}")
+                        continue
+                
+                # All branches failed
                 result["success"] = False
-                result["error"] = f"File not found at URL: {url}"
+                result["error"] = f"File not found at URL: {url} (also tried branches: {fallback_branches})"
                 
             elif response.status_code == 403:
                 result["success"] = False
@@ -583,6 +981,21 @@ def get_repo_file(
             "limit": MAX_FILES_PER_BATCH,
             "requested": len(filepaths)
         }
+    
+    # =======================================================================
+    # FULL_FILEPATH MODE: If ALL filepaths are in <repo_name>/<path> format
+    # This is the NEW PREFERRED path using full_filepath from repos.files
+    # =======================================================================
+    full_filepath_entries = [fp for fp in filepaths if _is_full_filepath(str(fp)) and not _is_raw_github_url(str(fp))]
+    
+    if len(full_filepath_entries) == len(filepaths):
+        logger.info(f"[FULL_FILEPATH MODE] Detected {len(filepaths)} full_filepath entries")
+        return download_files_from_full_filepaths(
+            full_filepaths=filepaths,
+            branch=branch,
+            target_volume=target_volume,
+            continue_on_error=True
+        )
     
     # =======================================================================
     # RAW URL MODE: If ALL filepaths are raw GitHub URLs, use direct download

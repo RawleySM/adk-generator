@@ -1,0 +1,17 @@
+14) LocalBackend timeout not enforced - FIXED
+
+RESOLVED: The timeout implementation has been fully fixed:
+
+1. Switched from ThreadPoolExecutor to multiprocessing.Process
+   - Processes CAN be terminated, unlike threads
+   - Uses process.terminate() (SIGTERM) followed by process.kill() (SIGKILL) if needed
+
+2. The wrapper LocalBackend.submit_and_wait() now correctly propagates timed_out:
+   - Reads timed_out from inner result.get("timed_out", False)
+   - Sets result_state to "TIMEDOUT" when timeout occurs
+
+3. Implementation in execution_backend.py:
+   - Module-level _execute_code_in_process() function runs in subprocess
+   - Results passed back via multiprocessing.Queue
+   - Graceful termination (5s wait) then force kill if still running
+   - Error message clearly indicates "(process terminated)"

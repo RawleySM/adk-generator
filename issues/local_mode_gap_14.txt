@@ -1,0 +1,12 @@
+14) LocalBackend timeout not enforced (partially fixed)
+There is now a ThreadPoolExecutor timeout around the exec() call:
+execution_backend.py
+Lines 433-446
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:    future = executor.submit(execute_code)    try:        future.result(timeout=timeout_seconds)    except concurrent.futures.TimeoutError:        result["status"] = "failed"        result["error"] = f"Execution timed out after {timeout_minutes} minutes"        result["timed_out"] = True        return result
+Remaining behavior gaps:
+The timed-out thread may continue running (comment acknowledges this).
+The wrapper LocalBackend.submit_and_wait() currently always returns "timed_out": False even if the inner local_result timed out:
+execution_backend.py
+Lines 272-286
+success = result.get("status") == "success"return {    ...    "timed_out": False,    "local_result": result,}
+So timeout is “enforced” in the sense that the caller returns early, but the top-level timed_out signal is incorrect.

@@ -7,6 +7,13 @@ The RLM workflow uses:
 - DeltaSessionService: Persists session state to Unity Catalog Delta tables
 - InMemoryArtifactService: Stores code artifacts for execution (future: DeltaArtifactService)
 
+Local Mode Support:
+    Set ADK_RUN_MODE=local to run without Spark/PySpark dependencies:
+    - Uses LocalSessionService with DuckDB backend for session persistence
+    - Uses LocalTelemetryPlugin for local telemetry storage
+    - Queries UC data via SQL Warehouse API instead of Spark
+    - Useful for local development and testing
+
 Usage:
     python -m databricks_rlm_agent.run
 
@@ -39,6 +46,9 @@ from google.genai import types
 from .sessions import DeltaSessionService
 from .secrets import load_secrets, validate_secrets
 
+# Type alias for session service (can be Delta or Local)
+SessionServiceType = DeltaSessionService  # Updated dynamically for local mode
+
 
 @dataclass(frozen=True, slots=True)
 class ConversationResult:
@@ -65,6 +75,11 @@ CATALOG = os.environ.get("ADK_DELTA_CATALOG", "silo_dev_rs")
 SCHEMA = os.environ.get("ADK_DELTA_SCHEMA", "adk")
 APP_NAME = os.environ.get("ADK_APP_NAME", "databricks_rlm_agent")
 DEFAULT_USER_ID = os.environ.get("ADK_DEFAULT_USER_ID", "job_user")
+
+# Run mode configuration (databricks or local)
+RUN_MODE = os.environ.get("ADK_RUN_MODE", "databricks")
+LOCAL_DB_PATH = os.environ.get("ADK_LOCAL_DB_PATH", ".adk_local/adk.duckdb")
+LOCAL_ARTIFACTS_PATH = os.environ.get("ADK_LOCAL_ARTIFACTS_PATH", ".adk_local/artifacts")
 
 # Flag to track if secrets have been loaded (for lazy initialization)
 _secrets_loaded = False
@@ -101,45 +116,86 @@ async def create_runner(
     spark: Optional["SparkSession"] = None,  # noqa: F821
     catalog: str = CATALOG,
     schema: str = SCHEMA,
-) -> tuple[Runner, DeltaSessionService]:
-    """Create a Runner with DeltaSessionService and ArtifactService.
+    run_mode: Optional[str] = None,
+) -> tuple[Runner, "SessionServiceType"]:
+    """Create a Runner with appropriate session service based on run mode.
 
     Args:
-        spark: Optional SparkSession. If None, will create one.
+        spark: Optional SparkSession. If None and run_mode is 'databricks', will create one.
         catalog: Unity Catalog name for session tables.
         schema: Schema name within the catalog.
+        run_mode: Execution mode ('local' or 'databricks'). If None, reads from
+            ADK_RUN_MODE env var (default: 'databricks').
 
     Returns:
-        Tuple of (Runner, DeltaSessionService) for use in agent execution.
+        Tuple of (Runner, SessionService) for use in agent execution.
     """
-    # Get or create SparkSession
-    if spark is None:
-        from pyspark.sql import SparkSession
-        spark = SparkSession.builder.getOrCreate()
+    # Determine run mode
+    if run_mode is None:
+        run_mode = RUN_MODE
 
-    # Ensure secrets are loaded before importing agent (which may use env vars)
-    _ensure_secrets_loaded(spark)
+    print(f"[RUN MODE] Initializing in {run_mode} mode")
 
-    # Import agent components after secrets are loaded
-    # This ensures GOOGLE_API_KEY and other env vars are set before
-    # the google.adk/google.genai clients are initialized
-    from .agent import (
-        root_agent,
-        # Full plugin chain - order matters for execution sequence
-        safety_plugin,              # 1. Block destructive operations first
-        formatting_plugin,          # 2. Validate delegation blob format
-        linting_plugin,             # 3. Validate Python syntax before execution
-        logging_plugin,             # 4. Telemetry and logging (UC Delta or stdout)
-        global_instruction_plugin,  # 5. Inject global instructions
-        context_injection_plugin,   # 6. Inject execution context to results_processor (+ stage tracking)
-    )
+    if run_mode == "local":
+        # Local mode: use DuckDB-backed services
+        from .sessions.local_session_service import LocalSessionService
+        from .plugins.local_telemetry_plugin import LocalTelemetryPlugin
 
-    # Initialize Delta session service
-    session_service = DeltaSessionService(
-        spark=spark,
-        catalog=catalog,
-        schema=schema,
-    )
+        # Ensure secrets are loaded (may still need API keys for LLM calls)
+        _ensure_secrets_loaded(spark=None)
+
+        # Import agent components after secrets are loaded
+        from .agent import (
+            root_agent,
+            safety_plugin,
+            formatting_plugin,
+            linting_plugin,
+            global_instruction_plugin,
+            context_injection_plugin,
+        )
+
+        # Initialize local session service with DuckDB
+        session_service = LocalSessionService(
+            db_path=LOCAL_DB_PATH,
+        )
+        print(f"[SESSION] Using LocalSessionService with DuckDB at {LOCAL_DB_PATH}")
+
+        # Initialize local telemetry plugin
+        logging_plugin = LocalTelemetryPlugin(
+            name="local_telemetry",
+            db_path=LOCAL_DB_PATH,
+            enable_stdout=True,
+        )
+        print(f"[TELEMETRY] Using LocalTelemetryPlugin with DuckDB at {LOCAL_DB_PATH}")
+
+    else:
+        # Databricks mode: use Spark/Delta-backed services
+        # Get or create SparkSession
+        if spark is None:
+            from pyspark.sql import SparkSession
+            spark = SparkSession.builder.getOrCreate()
+
+        # Ensure secrets are loaded before importing agent (which may use env vars)
+        _ensure_secrets_loaded(spark)
+
+        # Import agent components after secrets are loaded
+        from .agent import (
+            root_agent,
+            safety_plugin,
+            formatting_plugin,
+            linting_plugin,
+            logging_plugin,  # UC Delta telemetry plugin
+            global_instruction_plugin,
+            context_injection_plugin,
+        )
+
+        # Initialize Delta session service
+        session_service = DeltaSessionService(
+            spark=spark,
+            catalog=catalog,
+            schema=schema,
+        )
+        print(f"[SESSION] Using DeltaSessionService with {catalog}.{schema}")
 
     # Initialize artifact service for RLM workflow
     # InMemoryArtifactService is used for development
@@ -359,6 +415,7 @@ async def main(
     prompt: Optional[str] = None,
     user_id: str = DEFAULT_USER_ID,
     session_id: str = "session_001",
+    run_mode: Optional[str] = None,
 ):
     """Main entry point for running the agent.
 
@@ -366,19 +423,27 @@ async def main(
         prompt: Optional prompt. If None, uses a default test prompt.
         user_id: User identifier for the session.
         session_id: Session identifier.
+        run_mode: Execution mode ('local' or 'databricks'). If None, reads from
+            ADK_RUN_MODE env var (default: 'databricks').
     """
-    from pyspark.sql import SparkSession
+    # Determine run mode
+    if run_mode is None:
+        run_mode = RUN_MODE
 
     print(f"Initializing Databricks RLM Agent...")
+    print(f"  Run Mode: {run_mode}")
     print(f"  Catalog: {CATALOG}")
     print(f"  Schema: {SCHEMA}")
     print(f"  App Name: {APP_NAME}")
 
-    # Get SparkSession
-    spark = SparkSession.builder.getOrCreate()
+    # Get SparkSession only in Databricks mode
+    spark = None
+    if run_mode != "local":
+        from pyspark.sql import SparkSession
+        spark = SparkSession.builder.getOrCreate()
 
     # Create runner and session service
-    runner, session_service = await create_runner(spark=spark)
+    runner, session_service = await create_runner(spark=spark, run_mode=run_mode)
 
     # Create or resume session
     try:

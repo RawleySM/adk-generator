@@ -32,12 +32,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional, TYPE_CHECKING
 
 from google.adk.agents.base_agent import BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event, EventActions
 from google.genai import types
+
+if TYPE_CHECKING:
+    from databricks_rlm_agent.execution_backend import ExecutionBackend
 
 logger = logging.getLogger(__name__)
 
@@ -115,18 +118,23 @@ class JobBuilderAgent(BaseAgent):
         timeout_minutes: int = 60,
         artifacts_path: Optional[str] = None,
         description: str = "Deterministic job submission agent",
+        execution_backend: Optional["ExecutionBackend"] = None,
     ):
         """Initialize the JobBuilderAgent.
 
         Args:
             name: Agent name.
             executor_job_id: Databricks job ID for the executor. If None,
-                reads from ADK_EXECUTOR_JOB_ID env var.
+                reads from ADK_EXECUTOR_JOB_ID env var. Ignored if
+                execution_backend is provided.
             catalog: Unity Catalog name. If None, reads from env var.
             schema: Schema name. If None, reads from env var.
             timeout_minutes: Maximum time to wait for job completion.
             artifacts_path: Path for artifacts in UC Volumes.
             description: Agent description for telemetry.
+            execution_backend: Optional execution backend for code execution.
+                If None, uses DatabricksBackend with executor_job_id.
+                For local development, pass a LocalBackend instance.
         """
         super().__init__(name=name, description=description)
 
@@ -137,13 +145,26 @@ class JobBuilderAgent(BaseAgent):
         self._catalog = catalog or os.environ.get("ADK_DELTA_CATALOG", "silo_dev_rs")
         self._schema = schema or os.environ.get("ADK_DELTA_SCHEMA", "adk")
         self._timeout_minutes = timeout_minutes
-        self._artifacts_path = artifacts_path or os.environ.get(
-            "ADK_ARTIFACTS_PATH", "/Volumes/silo_dev_rs/adk/artifacts"
-        )
+
+        # For local mode, use ADK_LOCAL_ARTIFACTS_PATH; for Databricks mode use ADK_ARTIFACTS_PATH
+        run_mode = os.environ.get("ADK_RUN_MODE", "databricks")
+        if run_mode == "local":
+            default_artifacts_path = ".adk_local/artifacts"
+            self._artifacts_path = artifacts_path or os.environ.get(
+                "ADK_LOCAL_ARTIFACTS_PATH", default_artifacts_path
+            )
+        else:
+            self._artifacts_path = artifacts_path or os.environ.get(
+                "ADK_ARTIFACTS_PATH", "/Volumes/silo_dev_rs/adk/artifacts"
+            )
+
+        # Store execution backend (lazy initialization if None)
+        self._execution_backend = execution_backend
 
         logger.info(
             f"JobBuilderAgent initialized: executor_job_id={self._executor_job_id}, "
-            f"catalog={self._catalog}, schema={self._schema}"
+            f"catalog={self._catalog}, schema={self._schema}, "
+            f"backend={'custom' if execution_backend else 'default'}"
         )
 
     async def _run_async_impl(
@@ -691,6 +712,30 @@ class JobBuilderAgent(BaseAgent):
             logger.error(f"[JOB_BUILDER] Failed to load result.json: {e}")
             return None
 
+    def _get_execution_backend(self) -> "ExecutionBackend":
+        """Get or create the execution backend.
+
+        Returns the configured execution backend, creating a default
+        DatabricksBackend if none was provided during initialization.
+
+        Returns:
+            ExecutionBackend instance.
+
+        Raises:
+            ValueError: If no backend and no executor_job_id available.
+        """
+        if self._execution_backend is not None:
+            return self._execution_backend
+
+        # Lazy-create default DatabricksBackend
+        from databricks_rlm_agent.execution_backend import get_execution_backend
+
+        self._execution_backend = get_execution_backend(
+            executor_job_id=self._executor_job_id,
+            artifacts_path=self._artifacts_path,
+        )
+        return self._execution_backend
+
     def _submit_and_wait(
         self,
         artifact_path: str,
@@ -698,6 +743,10 @@ class JobBuilderAgent(BaseAgent):
         iteration: int,
     ) -> dict[str, Any]:
         """Submit executor job and wait for completion.
+
+        Uses the configured execution backend for code execution. In Databricks
+        mode, this submits a job via the Jobs API. In local mode, this executes
+        the artifact directly in-process.
 
         Args:
             artifact_path: Path to the code artifact.
@@ -707,10 +756,9 @@ class JobBuilderAgent(BaseAgent):
         Returns:
             Dict with job result information.
         """
-        from databricks_rlm_agent.jobs_api import submit_and_wait
+        backend = self._get_execution_backend()
 
-        return submit_and_wait(
-            executor_job_id=self._executor_job_id,
+        return backend.submit_and_wait(
             artifact_path=artifact_path,
             run_id=run_id,
             iteration=iteration,
@@ -794,6 +842,8 @@ class JobBuilderAgent(BaseAgent):
         Also marks the artifact as consumed when execution succeeds. This replaces
         the artifact consumed marking that was previously done by RlmContextPruningPlugin.
 
+        Uses local DuckDB registry in local mode, Spark/Delta registry in Databricks mode.
+
         Args:
             artifact_id: The artifact identifier.
             stdout: Captured standard output.
@@ -801,37 +851,64 @@ class JobBuilderAgent(BaseAgent):
             status: Execution status ("completed" or "failed").
             result_json_path: Path to the result.json file in UC Volumes.
         """
-        try:
-            from pyspark.sql import SparkSession
-            from databricks_rlm_agent.artifact_registry import get_artifact_registry
+        run_mode = os.environ.get("ADK_RUN_MODE", "databricks")
+        metadata = {
+            "stdout_length": len(stdout),
+            "stderr_length": len(stderr),
+        }
+        if result_json_path:
+            metadata["result_json_path"] = result_json_path
 
-            spark = SparkSession.builder.getOrCreate()
-            registry = get_artifact_registry(spark, ensure_exists=False)
+        if run_mode == "local":
+            # Use local DuckDB registry
+            try:
+                from databricks_rlm_agent.artifact_registry_local import get_local_artifact_registry
 
-            metadata = {
-                "stdout_length": len(stdout),
-                "stderr_length": len(stderr),
-            }
-            if result_json_path:
-                metadata["result_json_path"] = result_json_path
+                registry = get_local_artifact_registry(ensure_exists=False)
 
-            registry.update_artifact(
-                artifact_id=artifact_id,
-                status=status,
-                metadata=metadata,
-            )
-            logger.info(f"[JOB_BUILDER] Updated artifact registry: {artifact_id}")
+                registry.update_artifact(
+                    artifact_id=artifact_id,
+                    status=status,
+                    metadata=metadata,
+                )
+                logger.info(f"[JOB_BUILDER] Updated local artifact registry: {artifact_id}")
 
-            # Mark artifact as consumed on successful execution
-            # This replaces the responsibility from RlmContextPruningPlugin
-            if status == "completed":
-                try:
-                    registry.mark_consumed(artifact_id)
-                    logger.info(f"[JOB_BUILDER] Marked artifact {artifact_id} as consumed")
-                except Exception as e:
-                    logger.warning(f"[JOB_BUILDER] Could not mark artifact as consumed: {e}")
+                # Mark artifact as consumed on successful execution
+                if status == "completed":
+                    try:
+                        registry.mark_consumed(artifact_id)
+                        logger.info(f"[JOB_BUILDER] Marked artifact {artifact_id} as consumed")
+                    except Exception as e:
+                        logger.warning(f"[JOB_BUILDER] Could not mark artifact as consumed: {e}")
 
-        except ImportError:
-            logger.debug("[JOB_BUILDER] Spark not available - skipping registry update")
-        except Exception as e:
-            logger.warning(f"[JOB_BUILDER] Failed to update artifact registry: {e}")
+            except Exception as e:
+                logger.warning(f"[JOB_BUILDER] Failed to update local artifact registry: {e}")
+        else:
+            # Use Spark/Delta registry
+            try:
+                from pyspark.sql import SparkSession
+                from databricks_rlm_agent.artifact_registry import get_artifact_registry
+
+                spark = SparkSession.builder.getOrCreate()
+                registry = get_artifact_registry(spark, ensure_exists=False)
+
+                registry.update_artifact(
+                    artifact_id=artifact_id,
+                    status=status,
+                    metadata=metadata,
+                )
+                logger.info(f"[JOB_BUILDER] Updated artifact registry: {artifact_id}")
+
+                # Mark artifact as consumed on successful execution
+                # This replaces the responsibility from RlmContextPruningPlugin
+                if status == "completed":
+                    try:
+                        registry.mark_consumed(artifact_id)
+                        logger.info(f"[JOB_BUILDER] Marked artifact {artifact_id} as consumed")
+                    except Exception as e:
+                        logger.warning(f"[JOB_BUILDER] Could not mark artifact as consumed: {e}")
+
+            except ImportError:
+                logger.debug("[JOB_BUILDER] Spark not available - skipping registry update")
+            except Exception as e:
+                logger.warning(f"[JOB_BUILDER] Failed to update artifact registry: {e}")

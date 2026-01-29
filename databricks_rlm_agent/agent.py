@@ -45,7 +45,7 @@ from databricks_rlm_agent.plugins import (
 from databricks_rlm_agent.agents import JobBuilderAgent
 
 # Import prompts
-from databricks_rlm_agent.prompts import GLOBAL_INSTRUCTIONS, ROOT_AGENT_INSTRUCTION
+from databricks_rlm_agent.prompts import GLOBAL_INSTRUCTIONS, LOCAL_MODE_INSTRUCTION, get_root_agent_instruction
 
 # Import tools
 from databricks_rlm_agent.tools import (
@@ -139,8 +139,13 @@ if os.environ.get("ADK_USE_LOGGING_PLUGIN", "").lower() in ("1", "true", "yes"):
 else:
     logging_plugin = get_telemetry_plugin()
 
+# Build global instructions - append local mode instructions if ADK_RUN_MODE=local
+_global_instructions = GLOBAL_INSTRUCTIONS
+if os.environ.get("ADK_RUN_MODE") == "local":
+    _global_instructions += LOCAL_MODE_INSTRUCTION
+
 global_instruction_plugin = GlobalInstructionPlugin(
-    global_instruction=GLOBAL_INSTRUCTIONS,
+    global_instruction=_global_instructions,
     name="adk_poc_global_instructions"
 )
 
@@ -180,7 +185,7 @@ context_injection_plugin = RlmContextInjectionPlugin(
 databricks_analyst = LlmAgent(
     name="databricks_analyst",
     model=_agent_model,
-    instruction=ROOT_AGENT_INSTRUCTION,
+    instruction=get_root_agent_instruction(),
     tools=[
         FunctionTool(save_artifact_to_volumes),
         FunctionTool(exit_loop),

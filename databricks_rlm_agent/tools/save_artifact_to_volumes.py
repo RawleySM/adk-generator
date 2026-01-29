@@ -1,8 +1,13 @@
 import os
 from google.adk.tools import ToolContext
 
-# Databricks Volumes paths - configurable via environment variables
-ARTIFACTS_PATH = os.environ.get("ADK_ARTIFACTS_PATH", "/Volumes/silo_dev_rs/adk/artifacts")
+# Artifact paths - configurable via environment variables
+# For local mode, use ADK_LOCAL_ARTIFACTS_PATH; for Databricks mode use ADK_ARTIFACTS_PATH
+_run_mode = os.environ.get("ADK_RUN_MODE", "databricks")
+if _run_mode == "local":
+    ARTIFACTS_PATH = os.environ.get("ADK_LOCAL_ARTIFACTS_PATH", ".adk_local/artifacts")
+else:
+    ARTIFACTS_PATH = os.environ.get("ADK_ARTIFACTS_PATH", "/Volumes/silo_dev_rs/adk/artifacts")
 
 def save_artifact_to_volumes(filename: str, content: str, tool_context: ToolContext) -> dict:
     """

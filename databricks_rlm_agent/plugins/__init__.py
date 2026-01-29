@@ -4,6 +4,7 @@ This package provides custom plugins for the RLM workflow:
 
 Core Plugins:
 - UcDeltaTelemetryPlugin: Persists callback-level telemetry to UC Delta tables
+- LocalTelemetryPlugin: Persists callback-level telemetry to local DuckDB (local mode)
 - UcToolExecutionSafetyPlugin: Blocks destructive SQL/shell operations
 
 RLM Workflow Plugins:
@@ -14,6 +15,7 @@ RLM Workflow Plugins:
 """
 
 from .uc_delta_telemetry_plugin import UcDeltaTelemetryPlugin
+from .local_telemetry_plugin import LocalTelemetryPlugin
 from .uc_tool_execution_safety_plugin import (
     UcToolExecutionSafetyPlugin,
     BlockedPattern,
@@ -26,6 +28,7 @@ from .rlm_context_injection_plugin import RlmContextInjectionPlugin
 __all__ = [
     # Core plugins
     "UcDeltaTelemetryPlugin",
+    "LocalTelemetryPlugin",
     "UcToolExecutionSafetyPlugin",
     "BlockedPattern",
     "SafetyCheckResult",

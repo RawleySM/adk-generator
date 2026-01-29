@@ -59,3 +59,10 @@ Thumbs.db
 
 # Databricks bundle state
 .databricks/
+
+# BMAD generated directories
+databricks_rlm_agent/_bmad/
+databricks_rlm_agent/_bmad-output/
+
+# Windows Zone.Identifier files
+*Zone.Identifier
