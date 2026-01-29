@@ -31,6 +31,7 @@ todos:
     dependencies:
       - dab-two-jobs-existing-cluster
       - package-entrypoints
+isProject: false
 ---
 
 # Two-job Lakeflow deployment via DAB (existing cluster + cache-busting)
@@ -67,8 +68,6 @@ flowchart TD
   JobA --> Volumes[UC_Volumes_Artifacts]
   JobB --> Volumes
 ```
-
-
 
 ### Job_A responsibilities
 
